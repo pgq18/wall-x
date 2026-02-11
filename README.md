@@ -67,6 +67,9 @@ pip install -e .
 Install wall_x:
 ```bash
 git submodule update --init --recursive
+# "missing the 'build_editable' hook, so it cannot be installed in editable mode. Consider using a build backend that supports PEP 660."
+# pip install --upgrade pip
+# pip install --upgrade setuptools
 MAX_JOBS=4 pip install --no-build-isolation --verbose -e .
 ```
 

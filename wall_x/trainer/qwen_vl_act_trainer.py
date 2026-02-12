@@ -811,7 +811,7 @@ class QwenVlAct_Trainer:
 
         Saves model state, optimizer state, and training progress information.
         """
-        save_path = self.config["save_path"]
+        save_path = os.path.expanduser(self.config["save_path"])
         if step == 0:
             ckpt_path = f"{save_path}/{epoch}"
         else:

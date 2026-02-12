@@ -6,6 +6,7 @@ for multimodal transformer models in robotic learning tasks.
 """
 
 import json
+import os
 import random
 import re
 from collections import OrderedDict
@@ -659,6 +660,7 @@ class NormStats:
 
 
 def load_norm_stats(norm_stats_path, dataset_name):
+    norm_stats_path = os.path.expanduser(norm_stats_path)
     with open(norm_stats_path, "r") as f:
         norm_stats = json.load(f)
     action_key = KEY_MAPPINGS[dataset_name]["action"]

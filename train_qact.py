@@ -24,6 +24,13 @@ def load_config(config_path):
     with open(config_path, "r") as f:
         config = yaml.load(f, Loader=yaml.FullLoader)
 
+    # Expand ~ in all paths
+    for key in ["pretrained_wallx_path", "save_path", "norm_stats_path",
+                "action_tokenizer_path", "qwen_vl_act_config_path",
+                "profile_save_path"]:
+        if key in config and config[key] is not None:
+            config[key] = os.path.expanduser(config[key])
+
     # Set model_type in data config if not already set
     config["data"]["model_type"] = config.get("model_type")
 
@@ -82,7 +89,7 @@ def setup_logging(config, accelerator):
         return None
 
     # Create save directory if it doesn't exist
-    save_path = config["save_path"]
+    save_path = os.path.expanduser(config["save_path"])
     if not os.path.exists(save_path):
         print(f"Save path {save_path} does not exist, creating directory.")
         os.makedirs(save_path, exist_ok=True)

@@ -268,3 +268,9 @@ NOTES.md
 .env
 .env.local
 .env.*.local
+
+# Local dependencies and workspace
+*.whl
+lerobot/
+workspace/libero/finetuned
+workspace/libero/plots

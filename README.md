@@ -47,7 +47,13 @@ conda activate wallx
 Install requirements:
 ```bash
 pip install -r requirements.txt
-MAX_JOBS=4 pip install flash-attn==2.7.4.post1 --no-build-isolation
+pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
+# ubuntu 20.04
+export FLASH_ATTENTION_FORCE_BUILD=TRUE
+MAX_JOBS=4 pip install flash-attn==2.7.4.post1 --no-build-isolation --no-cache-dir --verbose
+# ubuntu 22.04
+wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+pip install ./flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
 ```
 
 Install lerobot:

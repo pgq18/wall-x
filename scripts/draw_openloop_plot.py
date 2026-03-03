@@ -1,4 +1,5 @@
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 import yaml
 import torch
 import argparse
@@ -28,10 +29,10 @@ if __name__ == "__main__":
     pred_horizon = args.pred_horizon
 
     # get train config
-    model_path = "/path/to/model"
-    action_tokenizer_path = "/path/to/action/tokenizer"
-    save_dir = "/path/to/save/dir"
-    path = "/path/to/train/config"
+    model_path = "/data/disk0/Home/pengguanqi/Workspace/VLA/dsrl_pi0/wall-x/workspace/libero/finetuned"
+    action_tokenizer_path = "/data/disk0/Models/fast"
+    save_dir = "/data/disk0/Home/pengguanqi/Workspace/VLA/dsrl_pi0/wall-x/workspace/libero/plots"
+    path = "/data/disk0/Home/pengguanqi/Workspace/VLA/dsrl_pi0/wall-x/workspace/libero/config_qact.yml"
     config = load_config(path)
 
     # load model with customized robot config
@@ -82,7 +83,7 @@ if __name__ == "__main__":
             denormalized_gt = (
                 model.action_preprocessor.normalizer_action.unnormalize_data(
                     gt_action_chunk,
-                    [lerobot_config.get("repo_id", "physical-intelligence/libero")],
+                    [lerobot_config.get("repo_id", "lerobot/libero_goal_image")],
                     dof_mask,
                 ).squeeze(0)
             )

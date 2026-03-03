@@ -38,7 +38,8 @@ ACTION_DATASET_NAMES = [
     "viola",
     "physical-intelligence/libero",
     "lerobot/aloha_mobile_cabinet",
-]
+    "lerobot/libero_goal_image"
+    ]
 
 # Supported multimodal datasets
 MULTIMODAL_DATASET_NAMES = [

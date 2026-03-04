@@ -1657,6 +1657,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         dof_mask: Optional[torch.FloatTensor] = None,
         agent_pos_mask: Optional[torch.FloatTensor] = None,
         re_generate: bool = False,
+        initial_noise: Optional[torch.FloatTensor] = None,
         **kwargs,
     ):
         """
@@ -1975,12 +1976,18 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
         # Handle diffusion-based action prediction
         if predict_mode == "diffusion":
-            # Initialize with random noise
-            noisy_action = torch.randn(
-                size=(batch_size, pred_horizon, action_dim),
-                dtype=inputs_embeds.dtype,
-                device=inputs_embeds.device,
-            )
+            # Use provided initial noise or generate random noise
+            if initial_noise is not None:
+                noisy_action = initial_noise.to(inputs_embeds.dtype).to(inputs_embeds.device)
+                # Ensure correct shape
+                if noisy_action.dim() == 2:
+                    noisy_action = noisy_action.unsqueeze(0)
+            else:
+                noisy_action = torch.randn(
+                    size=(batch_size, pred_horizon, action_dim),
+                    dtype=inputs_embeds.dtype,
+                    device=inputs_embeds.device,
+                )
             dof_mask = dof_mask.to(inputs_embeds.device).to(inputs_embeds.dtype)
 
             # Calculate token distribution across MoE expert groups

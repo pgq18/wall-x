@@ -68,6 +68,8 @@ Install wall_x:
 ```bash
 git submodule update --init --recursive
 MAX_JOBS=4 pip install --no-build-isolation --verbose .
+# For 4090 and H100
+TORCH_CUDA_ARCH_LIST="8.0;9.0" MAX_JOBS=4 pip install --no-build-isolation --verbose .
 ```
 
 ## Training

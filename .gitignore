@@ -268,3 +268,5 @@ NOTES.md
 .env
 .env.local
 .env.*.local
+
+extracted_samples

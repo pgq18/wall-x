@@ -28,10 +28,10 @@ if __name__ == "__main__":
     pred_horizon = args.pred_horizon
 
     # get train config
-    model_path = "/path/to/model"
+    model_path = "/home/pengguanqi/Models/finetuned_new"
     action_tokenizer_path = "/path/to/action/tokenizer"
-    save_dir = "/path/to/save/dir"
-    path = "/path/to/train/config"
+    save_dir = "/home/pengguanqi/Workspace/RK3588/wall-x/workspace/libero"
+    path = "/home/pengguanqi/Workspace/RK3588/wall-x/workspace/libero/config_qact.yml"
     config = load_config(path)
 
     # load model with customized robot config

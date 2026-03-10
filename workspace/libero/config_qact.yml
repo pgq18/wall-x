@@ -5,8 +5,8 @@
 log_name: "robotic_training_libero_goal_4"
 log_project: "vla_training"
 model_type: wall-oss
-pretrained_wallx_path: "/userdata/Models/finetuned_new/"  # Must set
-save_path: "/root/Workspace/wall-x/workspace/libero/workspace/"                # Must set
+pretrained_wallx_path: "/home/pengguanqi/Models/finetuned_new/"  # Must set
+save_path: "/home/pengguanqi/Workspace/RK3588/wall-x/workspace/libero/workspace/"                # Must set
 use_fast_tokenizer: False                       # True: train FAST, False: train Flow
 action_tokenizer_path: "/home/xieqijia/Models/fast/"         # Must set if use_fast_tokenizer is true
 
@@ -61,7 +61,7 @@ agent_pos_config:
   # rw: 1
   # gripper: 1
 
-norm_stats_path: "/root/Workspace/wall-x/workspace/libero/lerobot/libero_goal_image/norm_stats.json"
+norm_stats_path: "/home/pengguanqi/Workspace/RK3588/wall-x/workspace/libero/lerobot/libero_goal_image/norm_stats.json"
 
 enable_customized_robot_config: true
 customized_robot_config:

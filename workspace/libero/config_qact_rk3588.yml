@@ -1,0 +1,142 @@
+# Training Configuration for Wall-X Robotic Multi-Modal Learning
+# This configuration supports multi-modal learning with vision, language, and action data
+
+# Model and paths configuration
+log_name: "robotic_training_libero_goal_4"
+log_project: "vla_training"
+model_type: wall-oss
+pretrained_wallx_path: "/root/Models/finetuned_new/"  # Must set
+save_path: "/home/pengguanqi/Workspace/RK3588/wall-x/workspace/libero/workspace/"                # Must set
+use_fast_tokenizer: False                       # True: train FAST, False: train Flow
+action_tokenizer_path: "/home/xieqijia/Models/fast/"         # Must set if use_fast_tokenizer is true
+
+# Torch Profile
+profile: False
+profile_save_path: /root/Workspace/wall-x/workspace/libero/profile/
+profile_wait_iters: 10
+profile_warmup_iters: 5
+profile_active_iters: 2
+
+# Training hyperparameters
+num_warmup_steps: 100
+num_training_steps: 64000000
+learning_rate: 0.00005
+min_lr: 0.00005
+num_epoch: 100
+gradient_accumulation_steps: 64
+batch_size_per_gpu: 4
+padding_side: left
+epoch_save_interval: 2
+
+# Training optimization settings
+FSDP2: False
+torch_compile: False
+
+# # Checkpoint resuming configuration
+# resume:
+#   ckpt: "/home/pengguanqi/Workspace/VLA/wall-x/workspace/lerobot_libero/workspace/test3/11/"
+#   load_ckpt_only: true
+
+# Robot configuration - Define degrees of freedom for each component
+dof_config:
+  action_eef: 6
+  action_gripper: 1
+  # x: 1
+  # y: 1
+  # z: 1
+  # roll: 1
+  # pitch: 1
+  # yaw: 1
+  # gripper: 1
+
+# Agent proprioception configuration (typically matches DOF config)
+agent_pos_config:
+  state_eef_with_gripper: 8
+  # x: 1
+  # y: 1
+  # z: 1
+  # rx: 1
+  # ry: 1
+  # rz: 1
+  # rw: 1
+  # gripper: 1
+
+norm_stats_path: "/root/Workspace/wall-x/workspace/libero/lerobot/libero_goal_image/norm_stats.json"
+
+enable_customized_robot_config: true
+customized_robot_config:
+  name: "lerobot/libero_goal_image"
+  customized_dof_config:
+    action_eef: 6
+    action_gripper: 1
+    # x: 1
+    # y: 1
+    # z: 1
+    # roll: 1
+    # pitch: 1
+    # yaw: 1
+    # gripper: 1
+  customized_agent_pos_config:
+    state_eef_with_gripper: 8
+    # x: 1
+    # y: 1
+    # z: 1
+    # rx: 1
+    # ry: 1
+    # rz: 1
+    # rw: 1
+    # gripper: 1
+
+# Data configuration
+data:
+  use_lerobot: true
+
+  # LeRobot dataset configuration
+  lerobot_config:
+    repo_id: "lerobot/libero_goal_image"
+    root: "/userdata/Datasets/lerobot/libero_goal_image"
+    episodes: null
+    image_transforms: null
+    delta_timestamps: null
+    tolerance_s: 1e-4
+    revision: null
+    force_cache_sync: false
+    download_videos: true
+    video_backend: null
+
+  action_horizon: 32
+  train_test_split: 0.95
+
+  # Action keys for observation and prediction
+  obs_action_keys:
+    - state_eef_with_gripper
+    # - x
+    # - y
+    # - z
+    # - rx
+    # - ry
+    # - rz
+    # - rw
+    # - gripper
+
+  predict_action_keys:
+    - action_eef
+    - action_gripper
+    # - x
+    # - y
+    # - z
+    # - roll
+    # - pitch
+    # - yaw
+    # - gripper
+
+  # Image resolution configuration for different camera views
+  resolution:
+    face_view: 256
+    left_wrist_view: 256
+    right_wrist_view: 256
+    move1_view: 256
+    move2_view: 256
+    top_view: 256
+    wall_view: 256
+    multi_modal: 256

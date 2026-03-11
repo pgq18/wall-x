@@ -1,5 +1,7 @@
 #!/bin/bash
 
+export CUDA_VISIBLE_DEVICES="1"
+
 python test_inference.py \
     --config /home/pengguanqi/Workspace/RK3588/wall-x/workspace/libero/config_qact.yml \
     --norm_stats /home/pengguanqi/Workspace/RK3588/wall-x/workspace/libero/lerobot/libero_goal_image/norm_stats.json \

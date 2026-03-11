@@ -19,6 +19,7 @@ Usage:
 """
 
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import json
 import yaml
 import time
@@ -656,6 +657,7 @@ def main():
     print(f"Average latency: {avg_latency:.2f} ms")
     print(f"Min latency: {min_latency:.2f} ms")
     print(f"Max latency: {max_latency:.2f} ms")
+    print(latencies)
 
     print("\n" + "="*60)
     print("Prediction Results (last run):")
@@ -663,8 +665,8 @@ def main():
     print(f"Action sequence shape: {actions.shape}")
     print(f"First action: {actions[0]}")
     print(f"Last action: {actions[-1]}")
-    print("\nFull action sequence:")
-    print(actions)
+    # print("\nFull action sequence:")
+    # print(actions)
 
 
 if __name__ == "__main__":

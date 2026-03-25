@@ -1,5 +1,6 @@
 import os, sys
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__))), "packages")
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "packages"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import dataclasses
 import enum
 import logging

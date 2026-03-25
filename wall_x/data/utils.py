@@ -32,6 +32,14 @@ KEY_MAPPINGS = {
         "state": "state",
         "action": "actions",
     },
+    "lerobot/libero_goal_image": {
+        "camera": {
+            "observation.images.image": "face_view",
+            "observation.images.wrist_image": "left_wrist_view",
+        },
+        "state": "observation.state",
+        "action": "action",
+    },
 }
 
 CAMERA_NAME_MAPPING = {

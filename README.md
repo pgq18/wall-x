@@ -53,8 +53,8 @@ MAX_JOBS=4 pip install flash-attn==2.7.4.post1 --no-build-isolation
 Install lerobot:
 ```bash
 git clone https://github.com/huggingface/lerobot.git
-git checkout 60efd87
 cd lerobot
+git checkout 60efd87
 pip install -e .
 ```
 

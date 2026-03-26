@@ -1,4 +1,5 @@
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 import yaml
 import torch
 import argparse
@@ -45,7 +46,7 @@ if __name__ == "__main__":
     # get test dataloader
     dataload_config = get_data_configs(config["data"])
     lerobot_config = dataload_config.get("lerobot_config", {})
-    dataset = load_test_dataset(config, lerobot_config, seed=42)
+    dataset = load_test_dataset(config, lerobot_config, seed=42, episode=0)
     dataloader = dataset.get_dataloader()
 
     total_frames = len(dataloader)

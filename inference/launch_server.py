@@ -64,10 +64,10 @@ class ModelConfig:
 
     # Path to the pretrained model checkpoint
     model_path: str
-    # Path to the action tokenizer
-    action_tokenizer_path: str
     # Path to train config yaml
     train_config_path: str
+    # Path to the action tokenizer
+    action_tokenizer_path: str | None = None
     # Action dimension for the environment
     action_dim: int = 7
     # State dimension for the environment
@@ -87,6 +87,8 @@ class ModelConfig:
     # Input image pre-resize dimensions (None means no pre-resize)
     input_image_height: int | None = None
     input_image_width: int | None = None
+    # Path to norm_stats.json (overrides train_config_path setting if provided)
+    norm_stats_path: str | None = None
 
 
 @dataclasses.dataclass
@@ -163,7 +165,7 @@ def create_policy(args: Args) -> WallXPolicy:
     if not Path(config.model_path).exists():
         logger.warning(f"Model path does not exist: {config.model_path}")
 
-    if not Path(config.action_tokenizer_path).exists():
+    if config.action_tokenizer_path and not Path(config.action_tokenizer_path).exists():
         logger.warning(
             f"Action tokenizer path does not exist: {config.action_tokenizer_path}"
         )
@@ -202,7 +204,10 @@ def main(args: Args) -> None:
     config = load_config(args.model_config.train_config_path)
     dataload_config = get_data_configs(config["data"])
     lerobot_config = dataload_config.get("lerobot_config", {})
-    norm_stats = load_norm_stats(config.get("norm_stats_path", None), lerobot_config.get("repo_id", None))
+    norm_stats = load_norm_stats(
+        args.model_config.norm_stats_path if args.model_config and args.model_config.norm_stats_path else config.get("norm_stats_path", None),
+        lerobot_config.get("repo_id", None)
+    )
     print(norm_stats)
     dp = DataProcessor(norm_stats)
     policy = create_policy(args)

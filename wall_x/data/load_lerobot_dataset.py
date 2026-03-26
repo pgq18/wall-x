@@ -488,6 +488,7 @@ def load_lerobot_data(
         episodes=train_episodes,
         delta_timestamps=delta_timestamps,
         video_backend="pyav",
+        tolerance_s=lerobot_config.get("tolerance_s", 0.0001),
     )
 
     if rank == 0:
@@ -582,6 +583,48 @@ def get_data_configs(config):
     return data_config
 
 
+class FixedLeRobotDataset(LeRobotDataset):
+    """Fixed version of LeRobotDataset that correctly handles delta_timestamps
+    when loading specific episodes (not episode 0).
+
+    The original LeRobotDataset.__getitem__ uses relative index `idx` instead of
+    absolute index when calculating query_indices in _get_query_indices, which
+    causes incorrect action chunk retrieval for episodes other than episode 0.
+    """
+
+    def __getitem__(self, idx) -> dict:
+        # Ensure dataset is loaded when we actually need to read from it
+        self._ensure_hf_dataset_loaded()
+        item = self.hf_dataset[idx]
+        ep_idx = item["episode_index"].item()
+        # FIX: Use absolute index instead of relative index for delta calculation
+        abs_idx = item["index"].item()
+
+        query_indices = None
+        if self.delta_indices is not None:
+            query_indices, padding = self._get_query_indices(abs_idx, ep_idx)
+            query_result = self._query_hf_dataset(query_indices)
+            item = {**item, **padding}
+            for key, val in query_result.items():
+                item[key] = val
+
+        if len(self.meta.video_keys) > 0:
+            current_ts = item["timestamp"].item()
+            query_timestamps = self._get_query_timestamps(current_ts, query_indices)
+            video_frames = self._query_videos(query_timestamps, ep_idx)
+            item = {**video_frames, **item}
+
+        if self.image_transforms is not None:
+            image_keys = self.meta.camera_keys
+            for cam in image_keys:
+                item[cam] = self.image_transforms(item[cam])
+
+        # Add task as a string
+        task_idx = item["task_index"].item()
+        item["task"] = self.meta.tasks.iloc[task_idx].name
+        return item
+
+
 class TestDataset(PreprocessedDataset):
     def __init__(
         self, dataset, config, dataload_config, norm_stats, lerobot_config, seed=42
@@ -637,6 +680,7 @@ def load_test_dataset(
     repo_id = lerobot_config.get("repo_id", None)
     assert repo_id is not None, "repo id is required"
     root = lerobot_config.get("root", None)
+    tolerance_s = lerobot_config.get("tolerance_s", 0.0001)
     meta_info = LeRobotDatasetMetadata(repo_id, root=root)
     dataset_fps = meta_info.fps
     dataload_config = get_data_configs(config["data"])
@@ -655,12 +699,13 @@ def load_test_dataset(
         ],
     }
 
-    dataset = LeRobotDataset(
+    dataset = FixedLeRobotDataset(
         repo_id,
         episodes=[episode],
         delta_timestamps=delta_timestamps,
         video_backend="pyav",
         root=root,
+        tolerance_s=tolerance_s,
     )
 
     print(f"Selected episodes: {dataset.episodes}")

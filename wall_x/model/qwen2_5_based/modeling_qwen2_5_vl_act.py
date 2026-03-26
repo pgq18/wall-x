@@ -843,7 +843,13 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             processor.action_processor = AutoProcessor.from_pretrained(
                 action_tokenizer_path, trust_remote_code=True
             )
-
+        if not train_config["use_flash_attn"]:
+            config._attn_implementation = "eager"
+        print("=======================================================")
+        print("=======================================================")
+        print("Attention Implementation Type: ", config._attn_implementation)
+        print("=======================================================")
+        print("=======================================================")
         # Set the customized robot configuration to ensure consistency between cross-embodiment
         # representations and the Wall-X action dimensionality.
         cls._set_customized_config(train_config)

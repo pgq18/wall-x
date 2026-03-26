@@ -61,7 +61,7 @@ agent_pos_config:
   # rw: 1
   # gripper: 1
 
-norm_stats_path: "/home/pgq/Models/libero_goal_finetuned_new/norm_stats.json"
+norm_stats_path: "/home/pengguanqi/Models/libero_goal_finetuned_new/norm_stats.json"
 
 enable_customized_robot_config: true
 customized_robot_config:

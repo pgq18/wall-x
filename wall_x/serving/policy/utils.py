@@ -43,6 +43,16 @@ def prepare_batch(
     """
     # Handle images - can be single image, list of images, or dict of images
     images = []
+    # Debug: print camera key and obs keys
+    print(f"[DEBUG] camera_key: {camera_key}")
+    print(f"[DEBUG] obs keys: {list(obs.keys())}")
+    for key in camera_key:
+        if key in obs:
+            img = obs[key]
+            shape = img.shape if hasattr(img, 'shape') else 'N/A'
+            print(f"[DEBUG] Found {key}, image shape: {shape}")
+        else:
+            print(f"[DEBUG] WARNING: {key} not found in obs!")
     images = [obs[key] for key in camera_key]
     # Convert numpy arrays to PIL Images
     processed_images = []

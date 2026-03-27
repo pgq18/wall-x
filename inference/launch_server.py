@@ -6,10 +6,11 @@ import enum
 import logging
 import socket
 from pathlib import Path
-from typing import List
+from typing import List, Union
 import tyro
 from dataclasses import field
 import yaml
+import ast
 from openpi_client import websocket_policy_server
 from wall_x.serving.policy.wall_x_policy import WallXPolicy
 from wall_x.data.utils import load_norm_stats
@@ -80,15 +81,31 @@ class ModelConfig:
     dtype: str = "bfloat16"
     # Prediction mode (fast or slow)
     predict_mode: str = "diffusion"
-    # Camera key for the environment
-    camera_key: List[str] = field(
-        default_factory=lambda: ["face_view", "left_wrist_view", "right_wrist_view"]
-    )
+    # Camera key for the environment (can be string like "['face_view', 'left_wrist_view']" or list)
+    camera_key: Union[List[str], str] = field(default_factory=lambda: ["face_view", "left_wrist_view"])
+
     # Input image pre-resize dimensions (None means no pre-resize)
     input_image_height: int | None = None
     input_image_width: int | None = None
     # Path to norm_stats.json (overrides train_config_path setting if provided)
     norm_stats_path: str | None = None
+
+    def __post_init__(self):
+        """Parse camera_key if it's a string representation of a list."""
+        if isinstance(self.camera_key, str):
+            try:
+                self.camera_key = ast.literal_eval(self.camera_key)
+            except (ValueError, SyntaxError):
+                # If parsing fails, treat as single key
+                self.camera_key = [self.camera_key]
+        elif isinstance(self.camera_key, list) and len(self.camera_key) == 1 and isinstance(self.camera_key[0], str):
+            # Handle case where tyro wraps string as single-element list
+            try:
+                parsed = ast.literal_eval(self.camera_key[0])
+                if isinstance(parsed, list):
+                    self.camera_key = parsed
+            except (ValueError, SyntaxError):
+                pass
 
 
 @dataclasses.dataclass
@@ -201,6 +218,7 @@ def load_config(config_path):
     return config
 
 def main(args: Args) -> None:
+    print(f"[DEBUG] camera_key: {args.model_config.camera_key}, type: {type(args.model_config.camera_key)}")
     config = load_config(args.model_config.train_config_path)
     dataload_config = get_data_configs(config["data"])
     lerobot_config = dataload_config.get("lerobot_config", {})

@@ -59,7 +59,7 @@ pip install ./flash_attn-2.7.4.post1+cu12torch2.7cxx11abiFALSE-cp311-cp311-linux
 Install lerobot:
 ```bash
 git clone https://github.com/huggingface/lerobot.git
-git checkout c66cd401767e60baece16e1cf68da2824227e076
+git checkout 60efd87
 cd lerobot
 pip install -e .
 ```

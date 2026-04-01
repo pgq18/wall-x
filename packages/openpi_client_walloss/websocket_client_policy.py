@@ -44,7 +44,10 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 time.sleep(5)
 
     @override
-    def infer(self, obs: Dict) -> Dict:  # noqa: UP006
+    def infer(self, obs: Dict, noise=None) -> Dict:  # noqa: UP006
+        if noise is not None:
+            import numpy as np
+            obs = {**obs, "noise": np.asarray(noise)}
         data = self._packer.pack(obs)
         self._ws.send(data)
         response = self._ws.recv()

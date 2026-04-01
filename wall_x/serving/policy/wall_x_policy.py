@@ -31,6 +31,8 @@ class WallXPolicy(BasePolicy):
         max_pixels: int = 16384 * 28 * 28,
         image_factor: int = 28,
         max_length: int = 768,
+        input_image_height: int | None = None,
+        input_image_width: int | None = None,
     ):
         """Initialize the Wall-X policy.
 
@@ -76,6 +78,8 @@ class WallXPolicy(BasePolicy):
         self.max_pixels = max_pixels
         self.image_factor = image_factor
         self.max_length = max_length
+        self.input_image_height = input_image_height
+        self.input_image_width = input_image_width
 
         # Load processor
         logger.info("Loading processor and tokenizer...")
@@ -106,7 +110,7 @@ class WallXPolicy(BasePolicy):
         self.buffer_index = 0
         logger.debug("Policy reset")
 
-    def infer(self, obs: Dict) -> Dict:
+    def infer(self, obs: Dict, noise=None) -> Dict:
         """Infer action from observation.
 
         Args:
@@ -115,6 +119,8 @@ class WallXPolicy(BasePolicy):
                 - 'prompt': Optional text prompt
                 - 'state': Optional robot state
                 - Other modality-specific observations
+            noise: Optional initial noise for diffusion mode steering.
+                   Shape: (batch, pred_horizon, action_dim) or (pred_horizon, action_dim).
 
         Returns:
             Dictionary containing:
@@ -122,6 +128,33 @@ class WallXPolicy(BasePolicy):
                 - Additional metadata
         """
         try:
+            # Process noise for diffusion mode
+            initial_noise = None
+            if noise is not None and self.predict_mode == "diffusion":
+                initial_noise = torch.as_tensor(
+                    np.asarray(noise), dtype=torch.float32, device=self.device
+                )
+                if initial_noise.ndim == 2:
+                    initial_noise = initial_noise.unsqueeze(0)
+                # Trim/pad time horizon to pred_horizon
+                if initial_noise.shape[1] > self.pred_horizon:
+                    initial_noise = initial_noise[:, :self.pred_horizon, :]
+                elif initial_noise.shape[1] < self.pred_horizon:
+                    pad = initial_noise[:, -1:, :].repeat(
+                        1, self.pred_horizon - initial_noise.shape[1], 1
+                    )
+                    initial_noise = torch.cat([initial_noise, pad], dim=1)
+                # Trim/pad action dim to fixed_action_dim (20)
+                if initial_noise.shape[2] < self.fixed_action_dim:
+                    repeat = self.fixed_action_dim // initial_noise.shape[2]
+                    rem = self.fixed_action_dim % initial_noise.shape[2]
+                    parts = [initial_noise.repeat(1, 1, repeat)]
+                    if rem > 0:
+                        parts.append(initial_noise[:, :, :rem])
+                    initial_noise = torch.cat(parts, dim=2)
+                elif initial_noise.shape[2] > self.fixed_action_dim:
+                    initial_noise = initial_noise[:, :, :self.fixed_action_dim]
+
             # Need to predict new actions
             input_batch = prepare_batch(
                 obs,
@@ -137,6 +170,8 @@ class WallXPolicy(BasePolicy):
                 self.max_pixels,
                 self.predict_mode,
                 self.device,
+                self.input_image_height,
+                self.input_image_width,
             )
 
             with torch.no_grad():
@@ -150,6 +185,7 @@ class WallXPolicy(BasePolicy):
                     pred_horizon=self.pred_horizon,
                     mode="predict",
                     predict_mode=self.predict_mode,
+                    initial_noise=initial_noise,
                 )
 
             if outputs["predict_action"] is None:

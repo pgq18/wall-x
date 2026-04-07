@@ -10,5 +10,4 @@ python launch_server.py \
   --model-config.norm-stats-path /home/pengguanqi/Workspace/VLA/test/wall-x/workspace/so101_pap151_20260321/lerobot/so101/norm_stats.json \
   --model-config.action-dim 14 \
   --model-config.state_dim 14 \
-  --model-config.input-image-height 256 \
-  --model-config.input-image-width 256 \
+  --model-config.input-image-resolution 256 \

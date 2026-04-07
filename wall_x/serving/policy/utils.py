@@ -24,8 +24,7 @@ def prepare_batch(
     max_pixels: int,
     predict_mode: str = "fast",
     device: str = "cuda",
-    input_image_height: int | None = None,
-    input_image_width: int | None = None,
+    input_image_resolution: int | None = None,
 ) -> BatchFeature:
     """Prepare observation into model input format.
 
@@ -99,7 +98,7 @@ def prepare_batch(
     # Apply smart resize to images
     resized_images = process_images(
         processed_images, image_factor, min_pixels, max_pixels,
-        input_image_height, input_image_width
+        input_image_resolution
     )
 
     # Handle text prompt - format with vision tokens
@@ -173,8 +172,7 @@ def process_images(
     image_factor: int,
     min_pixels: int,
     max_pixels: int,
-    input_image_height: int | None = None,
-    input_image_width: int | None = None,
+    input_image_resolution: int | None = None,
 ) -> List[Image.Image]:
     """Process images with optional pre-resize then smart resize.
 
@@ -183,17 +181,24 @@ def process_images(
         image_factor: Factor for smart resize (default 28)
         min_pixels: Minimum pixels for smart resize
         max_pixels: Maximum pixels for smart resize
-        input_image_height: Optional pre-resize height (None = no pre-resize)
-        input_image_width: Optional pre-resize width (None = no pre-resize)
+        input_image_resolution: Optional resolution for the longer edge (None = no pre-resize).
+            Images are resized proportionally to fit within this resolution.
 
     Returns:
         List of resized PIL Images
     """
     resized_images = []
     for img_pil in images:
-        # Pre-resize if dimensions are specified
-        if input_image_height is not None and input_image_width is not None:
-            img_pil = img_pil.resize((input_image_width, input_image_height))
+        # Pre-resize proportionally based on the longer edge
+        if input_image_resolution is not None:
+            orig_width, orig_height = img_pil.size
+            if orig_width > orig_height:  # Landscape
+                new_width = input_image_resolution
+                new_height = int(input_image_resolution * orig_height / orig_width)
+            else:  # Portrait or square
+                new_height = input_image_resolution
+                new_width = int(input_image_resolution * orig_width / orig_height)
+            img_pil = img_pil.resize((new_width, new_height))
 
         current_width, current_height = img_pil.size
 

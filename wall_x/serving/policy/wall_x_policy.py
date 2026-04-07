@@ -31,8 +31,7 @@ class WallXPolicy(BasePolicy):
         max_pixels: int = 16384 * 28 * 28,
         image_factor: int = 28,
         max_length: int = 768,
-        input_image_height: int | None = None,
-        input_image_width: int | None = None,
+        input_image_resolution: int | None = None,
     ):
         """Initialize the Wall-X policy.
 
@@ -78,8 +77,7 @@ class WallXPolicy(BasePolicy):
         self.max_pixels = max_pixels
         self.image_factor = image_factor
         self.max_length = max_length
-        self.input_image_height = input_image_height
-        self.input_image_width = input_image_width
+        self.input_image_resolution = input_image_resolution
 
         # Load processor
         logger.info("Loading processor and tokenizer...")
@@ -141,8 +139,7 @@ class WallXPolicy(BasePolicy):
                 self.max_pixels,
                 self.predict_mode,
                 self.device,
-                self.input_image_height,
-                self.input_image_width,
+                self.input_image_resolution,
             )
 
             with torch.no_grad():

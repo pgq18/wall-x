@@ -84,9 +84,8 @@ class ModelConfig:
     # Camera key for the environment (can be string like "['face_view', 'left_wrist_view']" or list)
     camera_key: Union[List[str], str] = field(default_factory=lambda: ["face_view", "left_wrist_view"])
 
-    # Input image pre-resize dimensions (None means no pre-resize)
-    input_image_height: int | None = None
-    input_image_width: int | None = None
+    # Input image pre-resize resolution for the longer edge (None means no pre-resize)
+    input_image_resolution: int | None = None
     # Path to norm_stats.json (overrides train_config_path setting if provided)
     norm_stats_path: str | None = None
 
@@ -202,8 +201,7 @@ def create_policy(args: Args) -> WallXPolicy:
         predict_mode=config.predict_mode,
         default_prompt=args.default_prompt,
         camera_key=config.camera_key,
-        input_image_height=config.input_image_height,
-        input_image_width=config.input_image_width,
+        input_image_resolution=config.input_image_resolution,
     )
 
     return policy

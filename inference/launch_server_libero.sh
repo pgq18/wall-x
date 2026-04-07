@@ -12,6 +12,5 @@ python launch_server.py \
   --model-config.state_dim 8 \
   --model-config.camera-key "['front_view', 'left_wrist_view']" \
   --model-config.camera-key front_view \
-  --model-config.input-image-height 256 \
-  --model-config.input-image-width 256 \
+  --model-config.input-image-resolution 256 \
 

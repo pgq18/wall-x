@@ -2009,6 +2009,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             rtc_prev_padded = None
             rtc_weight_matrix = None
             if prev_action is not None:
+                # Cast to model dtype to avoid float32/bfloat16 mismatch
+                prev_action = prev_action.to(dtype=inputs_embeds.dtype)
                 if prev_action.dim() == 3:
                     prev_action = prev_action[0]  # Remove batch dim -> [H, D]
                 # Shift: take actions from step s onwards, pad with s zeros at beginning

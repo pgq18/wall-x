@@ -79,6 +79,10 @@ class ActionChunkBroker(_base_policy.BasePolicy):
         """Standard (non-RTC) action chunking."""
         if self._last_results is None:
             self._last_results = self._policy.infer(obs)
+            # Squeeze batch dimension: (1, H, D) -> (H, D)
+            action = self._last_results["action"]
+            if isinstance(action, np.ndarray) and action.ndim == 3:
+                self._last_results["action"] = action[0]
             self._cur_step = 0
 
         def slicer(x):

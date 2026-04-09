@@ -32,6 +32,9 @@ class WallXPolicy(BasePolicy):
         image_factor: int = 28,
         max_length: int = 768,
         input_image_resolution: int | None = None,
+        rtc_s: int = 16,
+        rtc_d: int = 8,
+        rtc_beta: float = 8.0,
     ):
         """Initialize the Wall-X policy.
 
@@ -88,6 +91,11 @@ class WallXPolicy(BasePolicy):
         self.action_buffer = []
         self.buffer_index = 0
 
+        # RTC parameters
+        self.rtc_s = rtc_s
+        self.rtc_d = rtc_d
+        self.rtc_beta = rtc_beta
+
         logger.info(
             f"Model loaded successfully. Device: {device}, Action dim: {action_dim}, Horizon: {pred_horizon}"
         )
@@ -108,7 +116,7 @@ class WallXPolicy(BasePolicy):
         self.buffer_index = 0
         logger.debug("Policy reset")
 
-    def infer(self, obs: Dict) -> Dict:
+    def infer(self, obs: Dict, prev_action=None, is_rtc: bool = False) -> Dict:
         """Infer action from observation.
 
         Args:
@@ -117,6 +125,8 @@ class WallXPolicy(BasePolicy):
                 - 'prompt': Optional text prompt
                 - 'state': Optional robot state
                 - Other modality-specific observations
+            prev_action: Previous action chunk for RTC guided inference (numpy array, unnormalized).
+            is_rtc: Whether to use Real-Time Action Chunking mode.
 
         Returns:
             Dictionary containing:
@@ -142,6 +152,22 @@ class WallXPolicy(BasePolicy):
                 self.input_image_resolution,
             )
 
+            # Prepare prev_action for guided inference
+            prev_action_tensor = None
+            if is_rtc and prev_action is not None:
+                prev_action_tensor = torch.tensor(
+                    prev_action, device=self.device, dtype=torch.float32
+                )
+                if prev_action_tensor.ndim == 2:
+                    prev_action_tensor = prev_action_tensor.unsqueeze(0)
+                # Normalize prev_action using model's normalizer
+                dataset_names = input_batch.get("dataset_names", ["default"])
+                if isinstance(dataset_names, str):
+                    dataset_names = [dataset_names]
+                prev_action_tensor = self.model.action_preprocessor.normalizer_action.normalize_data(
+                    prev_action_tensor[:, :, :self.action_dim], dataset_names
+                )
+
             with torch.no_grad():
                 outputs = self.model(
                     **input_batch,
@@ -153,6 +179,10 @@ class WallXPolicy(BasePolicy):
                     pred_horizon=self.pred_horizon,
                     mode="predict",
                     predict_mode=self.predict_mode,
+                    prev_action=prev_action_tensor,
+                    rtc_s=self.rtc_s,
+                    rtc_d=self.rtc_d,
+                    rtc_beta=self.rtc_beta,
                 )
 
             if outputs["predict_action"] is None:

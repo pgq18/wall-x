@@ -25,8 +25,14 @@ logger = logging.getLogger(__name__)
 class BasePolicy:
     """Base class for policies that can be served."""
 
-    def infer(self, obs: Dict) -> Dict:
-        """Infer actions from observations."""
+    def infer(self, obs: Dict, prev_action=None, is_rtc: bool = False) -> Dict:
+        """Infer actions from observations.
+
+        Args:
+            obs: Observation dictionary.
+            prev_action: Previous action chunk for guided inference (RTC mode).
+            is_rtc: Whether to use Real-Time Action Chunking mode.
+        """
         raise NotImplementedError
 
     def reset(self) -> None:

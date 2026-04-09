@@ -129,6 +129,18 @@ class Args:
     # Enable debug logging
     debug: bool = False
 
+    # Enable Real-Time Action Chunking (RTC) mode
+    use_rtc: bool = False
+
+    # RTC: step at which background inference starts
+    rtc_s: int = 16
+
+    # RTC: deterministic region length (steps to wait after s before swapping)
+    rtc_d: int = 8
+
+    # RTC: action horizon for the broker
+    rtc_action_horizon: int = 32
+
 
 # Default model configurations for each environment
 DEFAULT_CONFIGS: dict[EnvMode, ModelConfig] = {
@@ -202,6 +214,8 @@ def create_policy(args: Args) -> WallXPolicy:
         default_prompt=args.default_prompt,
         camera_key=config.camera_key,
         input_image_resolution=config.input_image_resolution,
+        rtc_s=args.rtc_s,
+        rtc_d=args.rtc_d,
     )
 
     return policy
@@ -228,6 +242,14 @@ def main(args: Args) -> None:
     dp = DataProcessor(norm_stats)
     policy = create_policy(args)
     policy_metadata = policy.metadata
+
+    # Include RTC config in metadata for clients
+    policy_metadata["rtc_config"] = {
+        "enabled": args.use_rtc,
+        "s": args.rtc_s,
+        "d": args.rtc_d,
+        "action_horizon": args.rtc_action_horizon,
+    }
 
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)

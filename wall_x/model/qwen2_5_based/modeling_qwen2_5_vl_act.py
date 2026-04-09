@@ -1663,6 +1663,10 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         dof_mask: Optional[torch.FloatTensor] = None,
         agent_pos_mask: Optional[torch.FloatTensor] = None,
         re_generate: bool = False,
+        prev_action: Optional[torch.FloatTensor] = None,
+        rtc_s: int = 16,
+        rtc_d: int = 8,
+        rtc_beta: float = 8.0,
         **kwargs,
     ):
         """
@@ -2000,6 +2004,37 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             start_indices = torch.cumsum(group_size, dim=0) - group_size
             end_indices = torch.cumsum(group_size, dim=0)
 
+            # Prepare RTC guided inference parameters
+            # prev_action is in normalized space, shape: [pred_horizon, action_dim] or [1, pred_horizon, action_dim]
+            rtc_prev_padded = None
+            rtc_weight_matrix = None
+            if prev_action is not None:
+                if prev_action.dim() == 3:
+                    prev_action = prev_action[0]  # Remove batch dim -> [H, D]
+                # Shift: take actions from step s onwards, pad with s zeros at beginning
+                shifted = prev_action[rtc_s:, :action_dim]
+                padding = torch.zeros(
+                    rtc_s, action_dim,
+                    device=inputs_embeds.device, dtype=inputs_embeds.dtype,
+                )
+                rtc_prev_padded = torch.cat([padding, shifted], dim=0).unsqueeze(0)  # [1, H, D]
+
+                # Build weight matrix: first d steps = 1 (deterministic),
+                # middle decays exponentially, last s steps = 0 (free prediction)
+                rtc_weight_matrix = torch.ones(
+                    pred_horizon, device=inputs_embeds.device, dtype=inputs_embeds.dtype,
+                )
+                for i in range(pred_horizon):
+                    if i < rtc_d:
+                        rtc_weight_matrix[i] = 1.0
+                    elif i < pred_horizon - rtc_s:
+                        progress = (i - rtc_d) / max(pred_horizon - rtc_s - rtc_d, 1)
+                        rtc_weight_matrix[i] = float(torch.exp(torch.tensor(-rtc_beta * progress)))
+                    else:
+                        rtc_weight_matrix[i] = 0.0
+                # Shape: [1, H, 1] for broadcasting with [B, H, D]
+                rtc_weight_matrix = rtc_weight_matrix.unsqueeze(0).unsqueeze(-1)
+
             def step(timestep, noisy_action):
                 """
                 Single denoising step for diffusion process.
@@ -2009,7 +2044,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     noisy_action: Current noisy action estimate
 
                 Returns:
-                    torch.Tensor: Predicted clean action
+                    torch.Tensor: Flow velocity (or guided velocity for RTC)
                 """
                 action_mask = input_ids == self.action_token_id_set["action_token_id"]
                 assert action_mask.any(), "No action token found in input_ids"
@@ -2045,8 +2080,19 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 hidden_states = transformer_outputs.last_hidden_state
                 action_mask = input_ids == self.action_token_id_set["action_token_id"]
                 action_hidden_states = hidden_states[action_mask]
-                pred = self.action_preprocessor.action_proj_back(action_hidden_states)
-                return pred.reshape(batch_size, pred_horizon, action_dim)
+                v = self.action_preprocessor.action_proj_back(action_hidden_states)
+                v = v.reshape(batch_size, pred_horizon, action_dim)
+
+                # Apply RTC guided inference: blend model velocity with guidance
+                # Flow matching: x_0_pred = x_t + (1-t) * v
+                # Guidance: v_guided = (1-W) * v + W * (prev_action - x_t) / (1-t)
+                if rtc_prev_padded is not None:
+                    t_val = timestep[0].item()
+                    if t_val < 1.0:
+                        guidance_v = (rtc_prev_padded[:, :, :action_dim] - noisy_action[:, :, :action_dim]) / max(1.0 - t_val, 1e-6)
+                        v = (1 - rtc_weight_matrix) * v + rtc_weight_matrix * guidance_v
+
+                return v
 
             # Perform ODE integration for diffusion sampling
             times = torch.linspace(

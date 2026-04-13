@@ -2013,20 +2013,19 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 prev_action = prev_action.to(dtype=inputs_embeds.dtype)
                 if prev_action.dim() == 3:
                     prev_action = prev_action[0]  # Remove batch dim -> [H, D]
-                # DEBUG: check prev_action input
-                print(f"[RTC DEBUG] prev_action: shape={prev_action.shape}, dtype={prev_action.dtype}, "
-                      f"nan={torch.isnan(prev_action).any().item()}, "
-                      f"range=[{prev_action.min().item():.4f},{prev_action.max().item():.4f}]")
-                # Shift: take actions from step s onwards, pad with s zeros at beginning
+
+                # Get prev_action from step s onwards, then pad s zeros at the end.
+                # This aligns with Pi0: prev_action data in the first part (strong guidance),
+                # zeros in the last part (free prediction).
                 shifted = prev_action[rtc_s:, :action_dim]
                 padding = torch.zeros(
                     rtc_s, action_dim,
                     device=inputs_embeds.device, dtype=inputs_embeds.dtype,
                 )
-                rtc_prev_padded = torch.cat([padding, shifted], dim=0).unsqueeze(0)  # [1, H, D]
+                rtc_prev_padded = torch.cat([shifted, padding], dim=0).unsqueeze(0)  # [1, H, D]
 
-                # Build weight matrix: first d steps = 1 (deterministic),
-                # middle decays exponentially, last s steps = 0 (free prediction)
+                # Build weight matrix W ∈ R^H (matches Pi0's make_W).
+                # Three segments: [1]*d, smooth decay, [0]*s
                 rtc_weight_matrix = torch.ones(
                     pred_horizon, device=inputs_embeds.device, dtype=inputs_embeds.dtype,
                 )
@@ -2034,8 +2033,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     if i < rtc_d:
                         rtc_weight_matrix[i] = 1.0
                     elif i < pred_horizon - rtc_s:
-                        progress = (i - rtc_d) / max(pred_horizon - rtc_s - rtc_d, 1)
-                        rtc_weight_matrix[i] = float(torch.exp(torch.tensor(-rtc_beta * progress)))
+                        c_i = (pred_horizon - rtc_s - i) / max(pred_horizon - rtc_s - rtc_d + 1, 1)
+                        rtc_weight_matrix[i] = c_i * (np.exp(c_i) - 1) / (np.e - 1)
                     else:
                         rtc_weight_matrix[i] = 0.0
                 # Shape: [1, H, 1] for broadcasting with [B, H, D]
@@ -2055,100 +2054,106 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 action_mask = input_ids == self.action_token_id_set["action_token_id"]
                 assert action_mask.any(), "No action token found in input_ids"
 
-                # Prepare timestep for batch processing
-                timestep = timestep.unsqueeze(0).repeat(noisy_action.shape[0])
-                action_embed = self.action_preprocessor.step(
-                    timestep=timestep, noisy_action=noisy_action, dof_mask=dof_mask
-                )
-                action_embed = action_embed.reshape(-1, inputs_embeds.shape[-1])
+                use_vjp = rtc_prev_padded is not None
 
-                # Create temporary copy of embeddings for thread safety
-                temp_inputs_embeds = inputs_embeds.clone()
-                temp_inputs_embeds[action_mask] = action_embed
+                if use_vjp:
+                    # VJP-guided inference: need gradient tracking through the model
+                    with torch.enable_grad():
+                        x_t = noisy_action.detach().requires_grad_(True)
 
-                # Forward pass through transformer
-                transformer_outputs = self.model(
-                    input_ids=None,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_values=past_key_values,
-                    inputs_embeds=temp_inputs_embeds,
-                    moe_token_types=moe_token_types,
-                    start_indices=start_indices,
-                    end_indices=end_indices,
-                    use_cache=True,
-                    output_attentions=False,
-                    output_hidden_states=False,
-                    return_dict=True,
-                )
+                        timestep_rep = timestep.unsqueeze(0).repeat(x_t.shape[0])
+                        action_embed = self.action_preprocessor.step(
+                            timestep=timestep_rep, noisy_action=x_t, dof_mask=dof_mask
+                        )
+                        action_embed = action_embed.reshape(-1, inputs_embeds.shape[-1])
 
-                # Extract action predictions from hidden states
-                hidden_states = transformer_outputs.last_hidden_state
-                action_mask = input_ids == self.action_token_id_set["action_token_id"]
-                action_hidden_states = hidden_states[action_mask]
-                v = self.action_preprocessor.action_proj_back(action_hidden_states)
-                v = v.reshape(batch_size, pred_horizon, action_dim)
+                        temp_inputs_embeds = inputs_embeds.clone()
+                        temp_inputs_embeds[action_mask] = action_embed
 
-                # Apply RTC guided inference (adapted from Pi0's guided_inference).
-                #
-                # Wall-x flow matching convention: t=0 is noise, t=1 is clean.
-                #   x_t = (1-t)*noise + t*action,  v = action - noise
-                #   Predicted clean action: a_pred = x_t + (1-t)*v
-                #
-                # Guidance approach:
-                #   1. Compute weighted error: e = W * (prev_action - a_pred)
-                #   2. Use r_t smooth clipping (prevents division-by-zero near t=1)
-                #   3. Clamp guidance strength to beta
-                #   4. Update: v_guided = v - guidance_strength * e
-                #      (first-order approx: skip VJP, use error direction directly)
-                if rtc_prev_padded is not None:
-                    t_val = timestep[0].item()
-                    # Skip guidance at very start (t≈0, pure noise, no meaningful signal)
-                    if t_val > 0.01:
-                        # Predict clean action
-                        a_pred = noisy_action[:, :, :action_dim] + (1.0 - t_val) * v
+                        transformer_outputs = self.model(
+                            input_ids=None,
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                            past_key_values=past_key_values,
+                            inputs_embeds=temp_inputs_embeds,
+                            moe_token_types=moe_token_types,
+                            start_indices=start_indices,
+                            end_indices=end_indices,
+                            use_cache=True,
+                            output_attentions=False,
+                            output_hidden_states=False,
+                            return_dict=True,
+                        )
 
-                        # Weighted error
+                        hidden_states = transformer_outputs.last_hidden_state
+                        action_hidden_states = hidden_states[action_mask]
+                        v = self.action_preprocessor.action_proj_back(action_hidden_states)
+                        v = v.reshape(batch_size, pred_horizon, action_dim)
+
+                        # Predict clean action (wall-x: t=0 noise, t=1 clean)
+                        t_val = timestep[0].item()
+                        a_pred = x_t[:, :, :action_dim] + (1.0 - t_val) * v
+
+                        # Weighted error: e = W * (prev_action - a_pred)
                         e = rtc_weight_matrix * (
                             rtc_prev_padded[:, :, :action_dim] - a_pred
                         )
 
-                        # Stability: r_t provides smooth interpolation
+                        # VJP: gradient of a_pred w.r.t. x_t, weighted by e.
+                        # This computes ∂a_pred/∂x_t^T · e, matching Pi0's jax.vjp approach.
+                        grad_x_t = torch.autograd.grad(
+                            outputs=a_pred, inputs=x_t, grad_outputs=e
+                        )[0]
+
+                    # Detach v for velocity update
+                    v = v.detach()
+
+                    if t_val > 0.01:
+                        # Stability factor r_t (adapted for wall-x convention: t=0→1)
                         # r_t = (1-t)^2 / ((1-t)^2 + t^2)
-                        #   t≈0 → r_t≈1 (strong), t≈1 → r_t≈0 (weak)
                         t_sq = t_val * t_val
                         one_minus_t_sq = (1.0 - t_val) ** 2
                         r_t = one_minus_t_sq / (one_minus_t_sq + t_sq + 1e-8)
 
-                        # Clamped guidance strength (mirrors Pi0's formula)
-                        # In wall-x convention: strength = min(beta, (1-t) / (t * r_t^2 + eps))
-                        # Near t=0 (noise): strength≈beta (clamped, strong guidance)
-                        # Near t=1 (clean): strength≈0 (no guidance)
+                        # Clamped guidance strength
+                        # strength = min(beta, (1-t) / (t * r_t^2 + eps))
                         guidance_strength = min(
                             rtc_beta,
                             (1.0 - t_val) / (t_val * r_t * r_t + 1e-6),
                         )
 
-                        # DEBUG: print values before guidance
-                        _v_nan = torch.isnan(v).any().item()
-                        _e_nan = torch.isnan(e).any().item()
-                        _noisy_nan = torch.isnan(noisy_action).any().item()
-                        _apred_nan = torch.isnan(a_pred).any().item()
-                        if _v_nan or _e_nan or _noisy_nan or _apred_nan:
-                            print(f"[RTC DEBUG NaN] t={t_val:.4f} strength={guidance_strength:.4f} "
-                                  f"r_t={r_t:.6f} | "
-                                  f"v_nan={_v_nan} e_nan={_e_nan} "
-                                  f"noisy_nan={_noisy_nan} apred_nan={_apred_nan} | "
-                                  f"v_range=[{v.min().item():.4f},{v.max().item():.4f}] "
-                                  f"e_range=[{e.min().item():.4f},{e.max().item():.4f}] "
-                                  f"noisy_range=[{noisy_action.min().item():.4f},{noisy_action.max().item():.4f}]")
+                        # Apply VJP-guided velocity update
+                        v = v - guidance_strength * grad_x_t
+                else:
+                    # Standard inference (no gradient tracking)
+                    timestep_rep = timestep.unsqueeze(0).repeat(noisy_action.shape[0])
+                    action_embed = self.action_preprocessor.step(
+                        timestep=timestep_rep, noisy_action=noisy_action, dof_mask=dof_mask
+                    )
+                    action_embed = action_embed.reshape(-1, inputs_embeds.shape[-1])
 
-                        # Apply guidance to velocity
-                        v = v - guidance_strength * e
+                    temp_inputs_embeds = inputs_embeds.clone()
+                    temp_inputs_embeds[action_mask] = action_embed
 
-                        _v_after_nan = torch.isnan(v).any().item()
-                        if _v_after_nan and not (_v_nan or _e_nan):
-                            print(f"[RTC DEBUG] NaN appeared AFTER guidance at t={t_val:.4f}")
+                    transformer_outputs = self.model(
+                        input_ids=None,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        inputs_embeds=temp_inputs_embeds,
+                        moe_token_types=moe_token_types,
+                        start_indices=start_indices,
+                        end_indices=end_indices,
+                        use_cache=True,
+                        output_attentions=False,
+                        output_hidden_states=False,
+                        return_dict=True,
+                    )
+
+                    hidden_states = transformer_outputs.last_hidden_state
+                    action_hidden_states = hidden_states[action_mask]
+                    v = self.action_preprocessor.action_proj_back(action_hidden_states)
+                    v = v.reshape(batch_size, pred_horizon, action_dim)
 
                 return v
 
@@ -2161,17 +2166,6 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 dtype=inputs_embeds.dtype,
             )
             action_trajectory = odeint(step, noisy_action, times, method="euler")
-
-            # DEBUG: check trajectory for NaN
-            if rtc_prev_padded is not None:
-                for i, t_val in enumerate(times):
-                    x = action_trajectory[i]
-                    if torch.isnan(x).any():
-                        print(f"[RTC DEBUG] NaN in trajectory at index {i}, t={t_val.item():.4f}")
-                        break
-                print(f"[RTC DEBUG] Trajectory final: shape={action_trajectory[-1].shape}, "
-                      f"nan={torch.isnan(action_trajectory[-1]).any().item()}, "
-                      f"range=[{action_trajectory[-1].min().item():.4f},{action_trajectory[-1].max().item():.4f}]")
 
             # Extract final predicted action and unnormalize
             predict_action = action_trajectory[-1]

@@ -218,7 +218,6 @@ class WallXPolicy(BasePolicy):
                 .numpy()
             )
 
-            print(predicted_actions.shape)
             return {"action": predicted_actions}
 
         except Exception as e:

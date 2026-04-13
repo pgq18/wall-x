@@ -2013,6 +2013,10 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 prev_action = prev_action.to(dtype=inputs_embeds.dtype)
                 if prev_action.dim() == 3:
                     prev_action = prev_action[0]  # Remove batch dim -> [H, D]
+                # DEBUG: check prev_action input
+                print(f"[RTC DEBUG] prev_action: shape={prev_action.shape}, dtype={prev_action.dtype}, "
+                      f"nan={torch.isnan(prev_action).any().item()}, "
+                      f"range=[{prev_action.min().item():.4f},{prev_action.max().item():.4f}]")
                 # Shift: take actions from step s onwards, pad with s zeros at beginning
                 shifted = prev_action[rtc_s:, :action_dim]
                 padding = torch.zeros(
@@ -2085,14 +2089,66 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 v = self.action_preprocessor.action_proj_back(action_hidden_states)
                 v = v.reshape(batch_size, pred_horizon, action_dim)
 
-                # Apply RTC guided inference: blend model velocity with guidance
-                # Flow matching: x_0_pred = x_t + (1-t) * v
-                # Guidance: v_guided = (1-W) * v + W * (prev_action - x_t) / (1-t)
+                # Apply RTC guided inference (adapted from Pi0's guided_inference).
+                #
+                # Wall-x flow matching convention: t=0 is noise, t=1 is clean.
+                #   x_t = (1-t)*noise + t*action,  v = action - noise
+                #   Predicted clean action: a_pred = x_t + (1-t)*v
+                #
+                # Guidance approach:
+                #   1. Compute weighted error: e = W * (prev_action - a_pred)
+                #   2. Use r_t smooth clipping (prevents division-by-zero near t=1)
+                #   3. Clamp guidance strength to beta
+                #   4. Update: v_guided = v - guidance_strength * e
+                #      (first-order approx: skip VJP, use error direction directly)
                 if rtc_prev_padded is not None:
                     t_val = timestep[0].item()
-                    if t_val < 1.0:
-                        guidance_v = (rtc_prev_padded[:, :, :action_dim] - noisy_action[:, :, :action_dim]) / max(1.0 - t_val, 1e-6)
-                        v = (1 - rtc_weight_matrix) * v + rtc_weight_matrix * guidance_v
+                    # Skip guidance at very start (t≈0, pure noise, no meaningful signal)
+                    if t_val > 0.01:
+                        # Predict clean action
+                        a_pred = noisy_action[:, :, :action_dim] + (1.0 - t_val) * v
+
+                        # Weighted error
+                        e = rtc_weight_matrix * (
+                            rtc_prev_padded[:, :, :action_dim] - a_pred
+                        )
+
+                        # Stability: r_t provides smooth interpolation
+                        # r_t = (1-t)^2 / ((1-t)^2 + t^2)
+                        #   t≈0 → r_t≈1 (strong), t≈1 → r_t≈0 (weak)
+                        t_sq = t_val * t_val
+                        one_minus_t_sq = (1.0 - t_val) ** 2
+                        r_t = one_minus_t_sq / (one_minus_t_sq + t_sq + 1e-8)
+
+                        # Clamped guidance strength (mirrors Pi0's formula)
+                        # In wall-x convention: strength = min(beta, (1-t) / (t * r_t^2 + eps))
+                        # Near t=0 (noise): strength≈beta (clamped, strong guidance)
+                        # Near t=1 (clean): strength≈0 (no guidance)
+                        guidance_strength = min(
+                            rtc_beta,
+                            (1.0 - t_val) / (t_val * r_t * r_t + 1e-6),
+                        )
+
+                        # DEBUG: print values before guidance
+                        _v_nan = torch.isnan(v).any().item()
+                        _e_nan = torch.isnan(e).any().item()
+                        _noisy_nan = torch.isnan(noisy_action).any().item()
+                        _apred_nan = torch.isnan(a_pred).any().item()
+                        if _v_nan or _e_nan or _noisy_nan or _apred_nan:
+                            print(f"[RTC DEBUG NaN] t={t_val:.4f} strength={guidance_strength:.4f} "
+                                  f"r_t={r_t:.6f} | "
+                                  f"v_nan={_v_nan} e_nan={_e_nan} "
+                                  f"noisy_nan={_noisy_nan} apred_nan={_apred_nan} | "
+                                  f"v_range=[{v.min().item():.4f},{v.max().item():.4f}] "
+                                  f"e_range=[{e.min().item():.4f},{e.max().item():.4f}] "
+                                  f"noisy_range=[{noisy_action.min().item():.4f},{noisy_action.max().item():.4f}]")
+
+                        # Apply guidance to velocity
+                        v = v - guidance_strength * e
+
+                        _v_after_nan = torch.isnan(v).any().item()
+                        if _v_after_nan and not (_v_nan or _e_nan):
+                            print(f"[RTC DEBUG] NaN appeared AFTER guidance at t={t_val:.4f}")
 
                 return v
 
@@ -2105,6 +2161,17 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 dtype=inputs_embeds.dtype,
             )
             action_trajectory = odeint(step, noisy_action, times, method="euler")
+
+            # DEBUG: check trajectory for NaN
+            if rtc_prev_padded is not None:
+                for i, t_val in enumerate(times):
+                    x = action_trajectory[i]
+                    if torch.isnan(x).any():
+                        print(f"[RTC DEBUG] NaN in trajectory at index {i}, t={t_val.item():.4f}")
+                        break
+                print(f"[RTC DEBUG] Trajectory final: shape={action_trajectory[-1].shape}, "
+                      f"nan={torch.isnan(action_trajectory[-1]).any().item()}, "
+                      f"range=[{action_trajectory[-1].min().item():.4f},{action_trajectory[-1].max().item():.4f}]")
 
             # Extract final predicted action and unnormalize
             predict_action = action_trajectory[-1]

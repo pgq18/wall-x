@@ -160,21 +160,33 @@ class WallXPolicy(BasePolicy):
                 )
                 if prev_action_tensor.ndim == 2:
                     prev_action_tensor = prev_action_tensor.unsqueeze(0)
-                # Pad to fixed_action_dim (20) before normalizing — normalizer expects full dim
-                if prev_action_tensor.shape[-1] < self.fixed_action_dim:
-                    pad = torch.zeros(
-                        *prev_action_tensor.shape[:-1],
-                        self.fixed_action_dim - prev_action_tensor.shape[-1],
-                        device=self.device, dtype=prev_action_tensor.dtype,
-                    )
-                    prev_action_tensor = torch.cat([prev_action_tensor, pad], dim=-1)
-                # Normalize prev_action using model's normalizer
+
                 dataset_names = input_batch.get("dataset_names", ["default"])
                 if isinstance(dataset_names, str):
                     dataset_names = [dataset_names]
-                prev_action_tensor = self.model.action_preprocessor.normalizer_action.normalize_data(
-                    prev_action_tensor, dataset_names
-                )
+                ds_name = dataset_names[0]
+
+                # Normalize only real action dims manually (avoids pad dims with delta=0 → NaN)
+                normalizer = self.model.action_preprocessor.normalizer_action
+                real_dim = min(prev_action_tensor.shape[-1], self.action_dim)
+                action_min = normalizer.min[ds_name][:real_dim].to(self.device)
+                action_delta = normalizer.delta[ds_name][:real_dim].to(self.device)
+                # (x - min) / delta, then scale to [-1, 1]
+                x_real = (prev_action_tensor[:, :, :real_dim] - action_min) / action_delta
+                x_real = x_real * 2 - 1
+                x_real = torch.clamp(x_real, -1, 1)
+
+                # Pad to fixed_action_dim with zeros
+                if real_dim < self.fixed_action_dim:
+                    pad = torch.zeros(
+                        prev_action_tensor.shape[0],
+                        prev_action_tensor.shape[1],
+                        self.fixed_action_dim - real_dim,
+                        device=self.device, dtype=prev_action_tensor.dtype,
+                    )
+                    prev_action_tensor = torch.cat([x_real, pad], dim=-1)
+                else:
+                    prev_action_tensor = x_real
 
             with torch.no_grad():
                 outputs = self.model(

@@ -820,6 +820,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         config_path=None,
         processor_path=None,
         action_tokenizer_path=None,
+        skip_transformer_weights=False,
         **kwargs,
     ):
         """
@@ -830,6 +831,9 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             config_path (str, optional): Configuration file path, if None will look for qwen25_config.json in pretrained_model_path
             processor_path (str, optional): Processor path, if None will load from default config
             action_tokenizer_path (str, optional): Action tokenizer path, if None will load from default config
+            skip_transformer_weights (bool): If True, skip loading ViT, transformer layers, and
+                final norm weights. Only load embed_tokens, lm_head, and action_preprocessor.
+                Use this when offloading inference to FPGA. Defaults to False.
             **kwargs: Additional arguments
 
         Returns:
@@ -857,7 +861,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         setattr(config, "customized_agent_pos_config", customized_agent_pos_config)
 
         # Initialize model with configuration and processor
-        model = cls(config, processor=processor, **kwargs)
+        model = cls(config, processor=processor, skip_transformer_weights=skip_transformer_weights, **kwargs)
 
         # Resize token embeddings to match processor tokenizer vocabulary size
         model.resize_token_embeddings(len(processor.tokenizer))
@@ -879,6 +883,15 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 del sd[key]
             state_dict.update(sd)
 
+        # Skip heavy transformer/ViT weights when using FPGA for inference
+        if skip_transformer_weights:
+            skip_prefixes = ("model.layers.", "model.norm.", "visual.")
+            state_dict = {
+                k: v for k, v in state_dict.items()
+                if not any(k.startswith(p) for p in skip_prefixes)
+            }
+            print(f"skip_transformer_weights=True: filtered out keys with prefixes {skip_prefixes}")
+
         model.load_state_dict(state_dict, strict=False)
 
         return model
@@ -891,6 +904,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         action_tokenizer=None,
         action_mapper=None,
         flow_loss_weight=1.0,
+        skip_transformer_weights=False,
     ):
         """
         Initialize the Qwen2.5 VLMoE model for action processing.
@@ -902,8 +916,13 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             action_tokenizer: Action-specific tokenizer
             action_mapper: Action mapping utility
             flow_loss_weight (float): Weight for flow loss computation
+            skip_transformer_weights (bool): If True, replace ViT, transformer layers,
+                and final norm with lightweight dummies to save memory.
+                Use when offloading inference to FPGA. Defaults to False.
         """
         super().__init__(config)
+
+        self.skip_transformer_weights = skip_transformer_weights
 
         # Initialize vision transformer and language model components
         self.visual = Qwen2_5_VisionTransformerPretrainedModel._from_config(
@@ -912,6 +931,13 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         self.model = Qwen2_5_VLMoEModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+        # Replace heavy components with dummies when using FPGA
+        if self.skip_transformer_weights:
+            self.visual = nn.Identity()
+            self.model.layers = nn.ModuleList()
+            self.model.norm = nn.Identity()
+            print("skip_transformer_weights=True: replaced visual, model.layers, model.norm with dummies")
 
         # Initialize loss function without reduction for channel-wise loss computation
         self.loss_fct = CrossEntropyLoss(reduction="none")
@@ -1657,6 +1683,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         dof_mask: Optional[torch.FloatTensor] = None,
         agent_pos_mask: Optional[torch.FloatTensor] = None,
         re_generate: bool = False,
+        fpga_client = None,
         **kwargs,
     ):
         """
@@ -1735,8 +1762,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         if inputs_embeds is None:
             inputs_embeds = self.model.embed_tokens(input_ids)
 
-            # Process image embeddings
-            if pixel_values is not None:
+            # Process image embeddings (skip when using FPGA — FPGA runs ViT internally)
+            if pixel_values is not None and not self.skip_transformer_weights:
                 pixel_values = pixel_values.type(self.visual.dtype)
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
                 n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
@@ -1758,8 +1785,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 )
                 inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
-            # Process video embeddings
-            if pixel_values_videos is not None:
+            # Process video embeddings (skip when using FPGA — FPGA runs ViT internally)
+            if pixel_values_videos is not None and not self.skip_transformer_weights:
                 pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
                 video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
                 n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
@@ -1994,6 +2021,9 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             start_indices = torch.cumsum(group_size, dim=0) - group_size
             end_indices = torch.cumsum(group_size, dim=0)
 
+            # FPGA iteration counter for mode1/mode2 switching
+            fpga_iter_idx = [0]
+
             def step(timestep, noisy_action):
                 """
                 Single denoising step for diffusion process.
@@ -2005,6 +2035,9 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 Returns:
                     torch.Tensor: Predicted clean action
                 """
+
+                nonlocal fpga_iter_idx
+
                 action_mask = input_ids == self.action_token_id_set["action_token_id"]
                 assert action_mask.any(), "No action token found in input_ids"
 
@@ -2019,26 +2052,38 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 temp_inputs_embeds = inputs_embeds.clone()
                 temp_inputs_embeds[action_mask] = action_embed
 
-                # Forward pass through transformer
-                transformer_outputs = self.model(
-                    input_ids=None,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_values=past_key_values,
-                    inputs_embeds=temp_inputs_embeds,
-                    moe_token_types=moe_token_types,
-                    start_indices=start_indices,
-                    end_indices=end_indices,
-                    use_cache=True,
-                    output_attentions=False,
-                    output_hidden_states=False,
-                    return_dict=True,
-                )
+                # Forward pass through transformer (or FPGA)
+                if self.skip_transformer_weights and fpga_client is None:
+                    raise RuntimeError(
+                        "Model was loaded with skip_transformer_weights=True, "
+                        "but no fpga_client was provided. Transformer/ViT weights are not available."
+                    )
+                elif fpga_client is not None:
+                    action_hidden_states = fpga_client.run_transformer_on_fpga(
+                        temp_inputs_embeds, input_ids, action_mask, fpga_iter_idx[0]
+                    )
+                    fpga_iter_idx[0] += 1
+                else:
+                    # Forward pass through transformer
+                    transformer_outputs = self.model(
+                        input_ids=None,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        inputs_embeds=temp_inputs_embeds,
+                        moe_token_types=moe_token_types,
+                        start_indices=start_indices,
+                        end_indices=end_indices,
+                        use_cache=True,
+                        output_attentions=False,
+                        output_hidden_states=False,
+                        return_dict=True,
+                    )
+                    # Extract action predictions from hidden states
+                    hidden_states = transformer_outputs.last_hidden_state
+                    action_mask = input_ids == self.action_token_id_set["action_token_id"]
+                    action_hidden_states = hidden_states[action_mask]
 
-                # Extract action predictions from hidden states
-                hidden_states = transformer_outputs.last_hidden_state
-                action_mask = input_ids == self.action_token_id_set["action_token_id"]
-                action_hidden_states = hidden_states[action_mask]
                 pred = self.action_preprocessor.action_proj_back(action_hidden_states)
                 return pred.reshape(batch_size, pred_horizon, action_dim)
 

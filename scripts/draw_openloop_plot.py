@@ -1,4 +1,7 @@
-import os
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "packages"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from fpga_vla_client import FPGATransformerClient
 import yaml
 import torch
 import argparse
@@ -22,6 +25,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--pred_horizon", type=int, default=32)
     parser.add_argument("--origin_action_dim", type=int, default=7)
+    parser.add_argument("--fpga-host", type=str, default="192.168.50.40")
+    parser.add_argument("--fpga-port", type=int, default=8001)
     args = parser.parse_args()
 
     origin_action_dim = args.origin_action_dim
@@ -36,11 +41,16 @@ if __name__ == "__main__":
 
     # load model with customized robot config
     model = Qwen2_5_VLMoEForAction.from_pretrained(
-        model_path, train_config=config, action_tokenizer_path=action_tokenizer_path
+        model_path, train_config=config, action_tokenizer_path=action_tokenizer_path, skip_transformer_weights=True
     )
     model.eval()
     model = model.to("cuda")
     model = model.bfloat16()
+
+    # connect to FPGA
+    print("Connecting to FPGA...")
+    fpga_client = FPGATransformerClient(host=args.fpga_host, port=args.fpga_port)
+    fpga_client.connect()
 
     # get test dataloader
     dataload_config = get_data_configs(config["data"])
@@ -61,6 +71,12 @@ if __name__ == "__main__":
     ):
         if idx % pred_horizon == 0 and idx + pred_horizon < total_frames:
             batch = batch.to("cuda")
+
+            # cache image for FPGA mode1
+            pixel_values = batch.get("pixel_values")
+            if pixel_values is not None:
+                fpga_client.set_cached_image(pixel_values)
+
             with torch.no_grad():
                 outputs = model(
                     **batch,
@@ -68,6 +84,7 @@ if __name__ == "__main__":
                     pred_horizon=pred_horizon,
                     mode="predict",
                     predict_mode=predict_mode,
+                    fpga_client=fpga_client,
                 )
                 pred_traj[idx : idx + pred_horizon] = (
                     outputs["predict_action"][:, :, :origin_action_dim]

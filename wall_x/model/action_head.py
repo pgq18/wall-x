@@ -269,8 +269,8 @@ class ActionProcessor(nn.Module):
         self.s = noise_scheduler_config.get("s", 0.999)  # Scaling factor
 
         # Initialize Beta distribution for noise scheduling
-        alpha_tensor = torch.tensor(self.beta_alpha, dtype=torch.float32).to("cuda")
-        beta_tensor = torch.tensor(self.beta_beta, dtype=torch.float32).to("cuda")
+        alpha_tensor = torch.tensor(self.beta_alpha, dtype=torch.float32)
+        beta_tensor = torch.tensor(self.beta_beta, dtype=torch.float32)
         self.beta_dist = Beta(alpha_tensor, beta_tensor)
 
         # Sinusoidal positional embedding for timesteps

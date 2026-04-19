@@ -5,7 +5,7 @@
 log_name: "robotic_training_libero_goal_4"
 log_project: "vla_training"
 model_type: wall-oss
-pretrained_wallx_path: "/root/Models/finetuned_new/"  # Must set
+pretrained_wallx_path: "/root/Models/libero_goal_finetuned_new/"  # Must set
 save_path: "/home/pengguanqi/Workspace/RK3588/wall-x/workspace/libero/workspace/"                # Must set
 use_fast_tokenizer: False                       # True: train FAST, False: train Flow
 action_tokenizer_path: "/home/xieqijia/Models/fast/"         # Must set if use_fast_tokenizer is true

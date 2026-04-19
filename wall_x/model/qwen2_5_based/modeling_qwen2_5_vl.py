@@ -28,7 +28,10 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from .configuration_qwen2_5_vl import Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig
-from wall_x.fusions import ops
+try:
+    from wall_x.fusions import ops
+except ImportError:
+    ops = None  # CUDA ops not available (e.g., on ARM edge devices with FPGA)
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_varlen_func

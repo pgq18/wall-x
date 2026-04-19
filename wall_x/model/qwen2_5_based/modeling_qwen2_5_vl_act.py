@@ -34,7 +34,10 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
 )
 
-from wall_x.fusions import ops
+try:
+    from wall_x.fusions import ops
+except ImportError:
+    ops = None  # CUDA ops not available (e.g., on ARM edge devices with FPGA)
 from wall_x.model.action_head import ActionProcessor
 from wall_x.model.qwen2_5_based.configuration_qwen2_5_vl import Qwen2_5_VLConfig
 from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl import (
@@ -916,28 +919,44 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             action_tokenizer: Action-specific tokenizer
             action_mapper: Action mapping utility
             flow_loss_weight (float): Weight for flow loss computation
-            skip_transformer_weights (bool): If True, replace ViT, transformer layers,
-                and final norm with lightweight dummies to save memory.
+            skip_transformer_weights (bool): If True, skip creating ViT, transformer layers,
+                flash attention, MoE modules, and CUDA-dependent components entirely.
+                Only creates embed_tokens, lm_head, and action_preprocessor.
                 Use when offloading inference to FPGA. Defaults to False.
         """
-        super().__init__(config)
-
         self.skip_transformer_weights = skip_transformer_weights
 
-        # Initialize vision transformer and language model components
-        self.visual = Qwen2_5_VisionTransformerPretrainedModel._from_config(
-            config.vision_config
-        )
-        self.model = Qwen2_5_VLMoEModel(config)
-        self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
-        # Replace heavy components with dummies when using FPGA
         if self.skip_transformer_weights:
+            # Override attention implementation to avoid flash_attn import checks
+            config._attn_implementation = "eager"
+
+            # Skip parent Qwen2_5_VLForConditionalGeneration.__init__ which creates
+            # CUDA-dependent ViT, transformer layers, flash attention, MoE, etc.
+            Qwen2_5_VLPreTrainedModel.__init__(self, config)
+
+            # Minimal ViT replacement - FPGA handles vision processing internally
             self.visual = nn.Identity()
+
+            # Minimal model with only embed_tokens (needed for text token embedding)
+            self.model = nn.Module()
+            self.model.embed_tokens = nn.Embedding(
+                config.vocab_size, config.hidden_size,
+                getattr(config, "pad_token_id", 0),
+            )
             self.model.layers = nn.ModuleList()
             self.model.norm = nn.Identity()
-            print("skip_transformer_weights=True: replaced visual, model.layers, model.norm with dummies")
+            print("skip_transformer_weights=True: skipped ViT and transformer init, using minimal embed_tokens only")
+        else:
+            super().__init__(config)
+
+            # Initialize vision transformer and language model components
+            self.visual = Qwen2_5_VisionTransformerPretrainedModel._from_config(
+                config.vision_config
+            )
+            self.model = Qwen2_5_VLMoEModel(config)
+
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         # Initialize loss function without reduction for channel-wise loss computation
         self.loss_fct = CrossEntropyLoss(reduction="none")
@@ -1361,18 +1380,28 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 or self.rope_deltas is None
                 or (past_key_values is None or past_key_values.get_seq_length() == 0)
             ):
-                position_ids, rope_deltas = ops.get_rope_index(
-                    input_ids=input_ids,
-                    image_grid_thw=image_grid_thw,
-                    video_grid_thw=video_grid_thw,
-                    second_per_grid_ts=second_per_grid_ts,
-                    attention_mask=attention_mask,
-                    spatial_merge_size=self.config.vision_config.spatial_merge_size,
-                    image_token_id=self.config.image_token_id,
-                    video_token_id=self.config.video_token_id,
-                    vision_start_token_id=self.config.vision_start_token_id,
-                    tokens_per_second=self.config.vision_config.tokens_per_second,
-                )
+                if ops is not None:
+                    position_ids, rope_deltas = ops.get_rope_index(
+                        input_ids=input_ids,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                        attention_mask=attention_mask,
+                        spatial_merge_size=self.config.vision_config.spatial_merge_size,
+                        image_token_id=self.config.image_token_id,
+                        video_token_id=self.config.video_token_id,
+                        vision_start_token_id=self.config.vision_start_token_id,
+                        tokens_per_second=self.config.vision_config.tokens_per_second,
+                    )
+                else:
+                    # Fallback: use pure Python implementation (no CUDA dependency)
+                    position_ids, rope_deltas = self.get_rope_index(
+                        input_ids=input_ids,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                        attention_mask=attention_mask,
+                    )
                 self.rope_deltas = rope_deltas
             # Use previously calculated rope deltas to get correct position IDs
             else:
@@ -1834,7 +1863,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
         # Calculate RoPE position IDs if not provided
         # Note: Cannot calculate rope deltas with 4D attention mask. TODO: Fix this limitation
-        if position_ids is None and (
+        # Skip when using FPGA — FPGA handles position encoding internally
+        if not self.skip_transformer_weights and position_ids is None and (
             attention_mask is None or attention_mask.ndim == 2
         ):
             # Calculate RoPE index once per generation in the pre-fill stage only
@@ -1843,18 +1873,28 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 or self.rope_deltas is None
                 or (past_key_values is None or past_key_values.get_seq_length() == 0)
             ):
-                position_ids, rope_deltas = ops.get_rope_index(
-                    input_ids=input_ids,
-                    image_grid_thw=image_grid_thw,
-                    video_grid_thw=video_grid_thw,
-                    second_per_grid_ts=second_per_grid_ts,
-                    attention_mask=attention_mask,
-                    spatial_merge_size=self.config.vision_config.spatial_merge_size,
-                    image_token_id=self.config.image_token_id,
-                    video_token_id=self.config.video_token_id,
-                    vision_start_token_id=self.config.vision_start_token_id,
-                    tokens_per_second=self.config.vision_config.tokens_per_second,
-                )
+                if ops is not None:
+                    position_ids, rope_deltas = ops.get_rope_index(
+                        input_ids=input_ids,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                        attention_mask=attention_mask,
+                        spatial_merge_size=self.config.vision_config.spatial_merge_size,
+                        image_token_id=self.config.image_token_id,
+                        video_token_id=self.config.video_token_id,
+                        vision_start_token_id=self.config.vision_start_token_id,
+                        tokens_per_second=self.config.vision_config.tokens_per_second,
+                    )
+                else:
+                    # Fallback: use pure Python implementation (no CUDA dependency)
+                    position_ids, rope_deltas = self.get_rope_index(
+                        input_ids=input_ids,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                        attention_mask=attention_mask,
+                    )
                 self.rope_deltas = rope_deltas
             # Use previously calculated rope deltas to get correct position IDs
             else:
@@ -2062,6 +2102,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     action_hidden_states = fpga_client.run_transformer_on_fpga(
                         temp_inputs_embeds, input_ids, action_mask, fpga_iter_idx[0]
                     )
+                    action_hidden_states = action_hidden_states.to(dtype=inputs_embeds.dtype)
                     fpga_iter_idx[0] += 1
                 else:
                     # Forward pass through transformer

@@ -33,10 +33,10 @@ if __name__ == "__main__":
     pred_horizon = args.pred_horizon
 
     # get train config
-    model_path = "/home/pengguanqi/Models/finetuned_new"
+    model_path = "/root/Models/libero_goal_finetuned_new"
     action_tokenizer_path = "/path/to/action/tokenizer"
-    save_dir = "/home/pengguanqi/Workspace/RK3588/wall-x/workspace/libero"
-    path = "/home/pengguanqi/Workspace/RK3588/wall-x/workspace/libero/config_qact.yml"
+    save_dir = "/userdata/root/Workspace/wall-x/workspace/libero"
+    path = "/userdata/root/Workspace/wall-x/workspace/libero/config_qact_rk3588.yml"
     config = load_config(path)
 
     # load model with customized robot config
@@ -44,8 +44,8 @@ if __name__ == "__main__":
         model_path, train_config=config, action_tokenizer_path=action_tokenizer_path, skip_transformer_weights=True
     )
     model.eval()
-    model = model.to("cuda")
-    model = model.bfloat16()
+    model = model.to("cpu")
+    model = model.float()
 
     # connect to FPGA
     print("Connecting to FPGA...")
@@ -70,7 +70,7 @@ if __name__ == "__main__":
         enumerate(dataloader), total=total_frames, desc="predicting"
     ):
         if idx % pred_horizon == 0 and idx + pred_horizon < total_frames:
-            batch = batch.to("cuda")
+            batch = batch.to("cpu")
 
             # cache image for FPGA mode1
             pixel_values = batch.get("pixel_values")

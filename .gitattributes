@@ -1,1 +1,5 @@
 workspace/lerobot_example/evaluation/lerobot_openloop.png filter=lfs diff=lfs merge=lfs -text
+
+# Normalize line endings
+* text=auto eol=lf
+*.bat text eol=crlf

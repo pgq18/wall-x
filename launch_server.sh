@@ -1,12 +1,17 @@
 #! /bin/bash
 
-export CUDA_VISIBLE_DEVICES="1"
-
 python launch_server.py \
-  --no-fake \
-  --port 8000 \
+  --port 7999 \
   --env LIBERO \
+  --use-rtc \
+  --rtc-s 16 \
+  --rtc-d 10 \
+  --rtc-action-horizon 32 \
    model-config:model-config \
-  --model-config.model-path /data/disk0/Home/pengguanqi/Workspace/RK3588/wall-x/checkpoints/finetuned_83 \
-  --model-config.action-tokenizer-path /path/to/action_tokenizer \
-  --model-config.train-config-path /data/disk0/Home/pengguanqi/Workspace/RK3588/wall-x/workspace/libero/config_qact.yml \
+  --model-config.model-path /home/pengguanqi/Workspace/VLA/test/wall-x/workspace/so101_pap151_20260321/workspace/39 \
+  --model-config.train-config-path /home/pengguanqi/Workspace/VLA/test/wall-x/workspace/so101_pap151_20260321/config_qact.yml \
+  --model-config.norm-stats-path /home/pengguanqi/Workspace/VLA/test/wall-x/workspace/so101_pap151_20260321/lerobot/so101/norm_stats.json \
+  --model-config.action-dim 6 \
+  --model-config.state_dim 6 \
+  --model-config.camera-key "['face_view', 'left_wrist_view']" \
+  --model-config.input-image-resolution 256 \

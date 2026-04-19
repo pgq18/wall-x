@@ -1,13 +1,16 @@
 import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "packages"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 import dataclasses
 import enum
 import logging
 import socket
 from pathlib import Path
-from typing import List
+from typing import List, Union
 import tyro
 from dataclasses import field
 import yaml
+import ast
 from openpi_client import websocket_policy_server
 from wall_x.serving.policy.wall_x_policy import WallXPolicy
 from wall_x.data.utils import load_norm_stats
@@ -62,10 +65,10 @@ class ModelConfig:
 
     # Path to the pretrained model checkpoint
     model_path: str
-    # Path to the action tokenizer
-    action_tokenizer_path: str
     # Path to train config yaml
     train_config_path: str
+    # Path to the action tokenizer
+    action_tokenizer_path: str | None = None
     # Action dimension for the environment
     action_dim: int = 7
     # State dimension for the environment
@@ -78,10 +81,30 @@ class ModelConfig:
     dtype: str = "bfloat16"
     # Prediction mode (fast or slow)
     predict_mode: str = "diffusion"
-    # Camera key for the environment
-    camera_key: List[str] = field(
-        default_factory=lambda: ["front_view", "left_wrist_view"]
-    )
+    # Camera key for the environment (can be string like "['face_view', 'left_wrist_view']" or list)
+    camera_key: Union[List[str], str] = field(default_factory=lambda: ["face_view", "left_wrist_view"])
+
+    # Input image pre-resize resolution for the longer edge (None means no pre-resize)
+    input_image_resolution: int | None = None
+    # Path to norm_stats.json (overrides train_config_path setting if provided)
+    norm_stats_path: str | None = None
+
+    def __post_init__(self):
+        """Parse camera_key if it's a string representation of a list."""
+        if isinstance(self.camera_key, str):
+            try:
+                self.camera_key = ast.literal_eval(self.camera_key)
+            except (ValueError, SyntaxError):
+                # If parsing fails, treat as single key
+                self.camera_key = [self.camera_key]
+        elif isinstance(self.camera_key, list) and len(self.camera_key) == 1 and isinstance(self.camera_key[0], str):
+            # Handle case where tyro wraps string as single-element list
+            try:
+                parsed = ast.literal_eval(self.camera_key[0])
+                if isinstance(parsed, list):
+                    self.camera_key = parsed
+            except (ValueError, SyntaxError):
+                pass
 
 
 @dataclasses.dataclass
@@ -106,7 +129,17 @@ class Args:
     # Enable debug logging
     debug: bool = False
 
-    fake: bool = True
+    # Enable Real-Time Action Chunking (RTC) mode
+    use_rtc: bool = False
+
+    # RTC: step at which background inference starts
+    rtc_s: int = 16
+
+    # RTC: deterministic region length (steps to wait after s before swapping)
+    rtc_d: int = 8
+
+    # RTC: action horizon for the broker
+    rtc_action_horizon: int = 32
 
 
 # Default model configurations for each environment
@@ -160,7 +193,7 @@ def create_policy(args: Args) -> WallXPolicy:
     if not Path(config.model_path).exists():
         logger.warning(f"Model path does not exist: {config.model_path}")
 
-    if not Path(config.action_tokenizer_path).exists():
+    if config.action_tokenizer_path and not Path(config.action_tokenizer_path).exists():
         logger.warning(
             f"Action tokenizer path does not exist: {config.action_tokenizer_path}"
         )
@@ -180,7 +213,9 @@ def create_policy(args: Args) -> WallXPolicy:
         predict_mode=config.predict_mode,
         default_prompt=args.default_prompt,
         camera_key=config.camera_key,
-        fake=args.fake,
+        input_image_resolution=config.input_image_resolution,
+        rtc_s=args.rtc_s,
+        rtc_d=args.rtc_d,
     )
 
     return policy
@@ -195,14 +230,26 @@ def load_config(config_path):
     return config
 
 def main(args: Args) -> None:
+    print(f"[DEBUG] camera_key: {args.model_config.camera_key}, type: {type(args.model_config.camera_key)}")
     config = load_config(args.model_config.train_config_path)
     dataload_config = get_data_configs(config["data"])
     lerobot_config = dataload_config.get("lerobot_config", {})
-    norm_stats = load_norm_stats(config.get("norm_stats_path", None), lerobot_config.get("repo_id", None))
+    norm_stats = load_norm_stats(
+        args.model_config.norm_stats_path if args.model_config and args.model_config.norm_stats_path else config.get("norm_stats_path", None),
+        lerobot_config.get("repo_id", None)
+    )
     print(norm_stats)
     dp = DataProcessor(norm_stats)
     policy = create_policy(args)
     policy_metadata = policy.metadata
+
+    # Include RTC config in metadata for clients
+    policy_metadata["rtc_config"] = {
+        "enabled": args.use_rtc,
+        "s": args.rtc_s,
+        "d": args.rtc_d,
+        "action_horizon": args.rtc_action_horizon,
+    }
 
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)

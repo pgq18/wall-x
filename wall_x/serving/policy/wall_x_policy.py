@@ -45,9 +45,14 @@ class WallXPolicy(BasePolicy):
         max_pixels: int = 16384 * 28 * 28,
         image_factor: int = 28,
         max_length: int = 768,
+        input_image_resolution: int | None = None,
+        rtc_s: int = 16,
+        rtc_d: int = 8,
+        rtc_beta: float = 8.0,
         fake: bool = False,
         norm_stats_path: str = "data/norm_stats.json",
         dataset_name: str = "lerobot/libero_goal_image",
+        skip_transformer_weights: bool = False,
     ):
         """Initialize the Wall-X policy.
 
@@ -67,19 +72,25 @@ class WallXPolicy(BasePolicy):
         """
         logger.info(f"Loading Wall-X model from {model_path}")
         self.fake_inference = fake
-        # Load normalization statistics
-        self.norm_stats = self._load_norm_stats(train_config["norm_stats_path"], train_config["data"]["lerobot_config"]["repo_id"])
+        # Load normalization statistics — use explicit path/dataset if provided, else fall back to train_config
+        _norm_path = norm_stats_path or train_config.get("norm_stats_path")
+        _dataset_name = dataset_name or train_config.get("data", {}).get("lerobot_config", {}).get("repo_id")
+        self.norm_stats = self._load_norm_stats(_norm_path, _dataset_name)
 
         if not self.fake_inference:
             self.model = Qwen2_5_VLMoEForAction.from_pretrained(
                 model_path,
                 train_config=train_config,
                 action_tokenizer_path=action_tokenizer_path,
+                skip_transformer_weights=skip_transformer_weights,
             )
             self.model.eval()
-            self.model = self.model.to(device)
-
-            self.model = self.model.bfloat16()
+            if skip_transformer_weights:
+                # On ARM edge devices: stay on CPU with float32
+                self.model = self.model.to("cpu").float()
+            else:
+                self.model = self.model.to(device)
+                self.model = self.model.bfloat16()
 
         # hard code the action dim to 20 for align to wall-x configuration
         self.fixed_action_dim = 20
@@ -97,6 +108,12 @@ class WallXPolicy(BasePolicy):
         self.max_pixels = max_pixels
         self.image_factor = image_factor
         self.max_length = max_length
+        self.input_image_resolution = input_image_resolution
+
+        # RTC parameters
+        self.rtc_s = rtc_s
+        self.rtc_d = rtc_d
+        self.rtc_beta = rtc_beta
 
         # Load processor
         logger.info("Loading processor and tokenizer...")
@@ -127,7 +144,7 @@ class WallXPolicy(BasePolicy):
         self.buffer_index = 0
         logger.debug("Policy reset")
 
-    def infer(self, obs: Dict) -> Dict:
+    def infer(self, obs: Dict, prev_action=None, is_rtc: bool = False) -> Dict:
         """Infer action from observation.
 
         Args:
@@ -136,6 +153,8 @@ class WallXPolicy(BasePolicy):
                 - 'prompt': Optional text prompt
                 - 'state': Optional robot state
                 - Other modality-specific observations
+            prev_action: Previous action chunk for RTC guided inference (numpy array, unnormalized).
+            is_rtc: Whether to use Real-Time Action Chunking mode.
 
         Returns:
             Dictionary containing:
@@ -158,7 +177,44 @@ class WallXPolicy(BasePolicy):
                 self.max_pixels,
                 self.predict_mode,
                 self.device,
+                self.input_image_resolution,
             )
+
+            # Prepare prev_action for guided inference
+            prev_action_tensor = None
+            if is_rtc and prev_action is not None:
+                prev_action_tensor = torch.tensor(
+                    prev_action, device=self.device, dtype=torch.float32
+                )
+                if prev_action_tensor.ndim == 2:
+                    prev_action_tensor = prev_action_tensor.unsqueeze(0)
+
+                dataset_names = input_batch.get("dataset_names", ["default"])
+                if isinstance(dataset_names, str):
+                    dataset_names = [dataset_names]
+                ds_name = dataset_names[0]
+
+                # Normalize only real action dims manually (avoids pad dims with delta=0 → NaN)
+                normalizer = self.model.action_preprocessor.normalizer_action
+                real_dim = min(prev_action_tensor.shape[-1], self.action_dim)
+                action_min = normalizer.min[ds_name][:real_dim].to(self.device)
+                action_delta = normalizer.delta[ds_name][:real_dim].to(self.device)
+                # (x - min) / delta, then scale to [-1, 1]
+                x_real = (prev_action_tensor[:, :, :real_dim] - action_min) / action_delta
+                x_real = x_real * 2 - 1
+                x_real = torch.clamp(x_real, -1, 1)
+
+                # Pad to fixed_action_dim with zeros
+                if real_dim < self.fixed_action_dim:
+                    pad = torch.zeros(
+                        prev_action_tensor.shape[0],
+                        prev_action_tensor.shape[1],
+                        self.fixed_action_dim - real_dim,
+                        device=self.device, dtype=prev_action_tensor.dtype,
+                    )
+                    prev_action_tensor = torch.cat([x_real, pad], dim=-1)
+                else:
+                    prev_action_tensor = x_real
 
             if not self.fake_inference:
                 with torch.no_grad():
@@ -172,6 +228,10 @@ class WallXPolicy(BasePolicy):
                         pred_horizon=self.pred_horizon,
                         mode="predict",
                         predict_mode=self.predict_mode,
+                        prev_action=prev_action_tensor,
+                        rtc_s=self.rtc_s,
+                        rtc_d=self.rtc_d,
+                        rtc_beta=self.rtc_beta,
                     )
 
                 if outputs["predict_action"] is None:

@@ -845,6 +845,15 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         # Load model components from pretrained path
         config_path = os.path.join(pretrained_model_path, "config.json")
         config = cls.config_class.from_pretrained(config_path)
+
+        # Downgrade attention implementation if flash_attn is not available
+        if getattr(config, "_attn_implementation", None) == "flash_attention_2":
+            try:
+                from flash_attn import flash_attn_func  # noqa: F401
+            except ImportError:
+                config._attn_implementation = "eager"
+                print("flash_attn not available, falling back to eager attention")
+
         processor = AutoProcessor.from_pretrained(pretrained_model_path, use_fast=True)
         if action_tokenizer_path is not None and train_config["use_fast_tokenizer"]:
             processor.action_processor = AutoProcessor.from_pretrained(

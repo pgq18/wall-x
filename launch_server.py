@@ -88,6 +88,8 @@ class ModelConfig:
     input_image_resolution: int | None = None
     # Path to norm_stats.json (overrides train_config_path setting if provided)
     norm_stats_path: str | None = None
+    # Skip loading transformer/ViT weights for FPGA offloading (saves memory on edge devices)
+    skip_transformer_weights: bool = False
 
     def __post_init__(self):
         """Parse camera_key if it's a string representation of a list."""
@@ -201,6 +203,10 @@ def create_policy(args: Args) -> WallXPolicy:
     with open(config.train_config_path, "r") as f:
         train_config = yaml.load(f, Loader=yaml.FullLoader)
 
+    # Override norm_stats_path in train_config with the one from CLI args if provided
+    if config.norm_stats_path:
+        train_config["norm_stats_path"] = config.norm_stats_path
+
     policy = WallXPolicy(
         model_path=config.model_path,
         train_config=train_config,
@@ -216,6 +222,9 @@ def create_policy(args: Args) -> WallXPolicy:
         input_image_resolution=config.input_image_resolution,
         rtc_s=args.rtc_s,
         rtc_d=args.rtc_d,
+        norm_stats_path=config.norm_stats_path,
+        dataset_name=train_config.get("data", {}).get("lerobot_config", {}).get("repo_id"),
+        skip_transformer_weights=config.skip_transformer_weights,
     )
 
     return policy

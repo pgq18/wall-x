@@ -31,7 +31,7 @@ from wall_x.serving.policy.wall_x_policy import WallXPolicy
 logger = logging.getLogger(__name__)
 
 # FPGA 协议常量
-VIT_RUN_TOKEN = 648
+VIT_RUN_TOKEN = 504
 LLM_HIDDEN_DIM = 2048
 ACTION_TOKENS = 32
 

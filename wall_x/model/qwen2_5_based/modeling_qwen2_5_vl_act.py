@@ -898,7 +898,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
         # Skip heavy transformer/ViT weights when using FPGA for inference
         if skip_transformer_weights:
-            skip_prefixes = ("model.layers.", "model.norm.", "visual.")
+            skip_prefixes = ("model.layers.", "model.norm.", "visual.", "lm_head.")
             state_dict = {
                 k: v for k, v in state_dict.items()
                 if not any(k.startswith(p) for p in skip_prefixes)
@@ -931,7 +931,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             flow_loss_weight (float): Weight for flow loss computation
             skip_transformer_weights (bool): If True, skip creating ViT, transformer layers,
                 flash attention, MoE modules, and CUDA-dependent components entirely.
-                Only creates embed_tokens, lm_head, and action_preprocessor.
+                Only creates embed_tokens and action_preprocessor.
                 Use when offloading inference to FPGA. Defaults to False.
         """
         self.skip_transformer_weights = skip_transformer_weights
@@ -955,7 +955,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             )
             self.model.layers = nn.ModuleList()
             self.model.norm = nn.Identity()
-            print("skip_transformer_weights=True: skipped ViT and transformer init, using minimal embed_tokens only")
+            print("skip_transformer_weights=True: skipped ViT, transformer, and lm_head init, using minimal embed_tokens only")
         else:
             super().__init__(config)
 
@@ -965,11 +965,12 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             )
             self.model = Qwen2_5_VLMoEModel(config)
 
-        self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+            self.vocab_size = config.vocab_size
+            self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        # Initialize loss function without reduction for channel-wise loss computation
-        self.loss_fct = CrossEntropyLoss(reduction="none")
+            # Initialize loss function without reduction for channel-wise loss computation
+            self.loss_fct = CrossEntropyLoss(reduction="none")
+
         self.flow_loss_weight = flow_loss_weight
         self.use_fast_tokenizer = use_fast_tokenizer
         self.processor = processor
@@ -983,14 +984,15 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         # Initialize action preprocessor
         self.action_preprocessor = ActionProcessor(config)
 
-        # Apply LoRA if specified in configuration
-        if hasattr(config, "use_lora") and config.use_lora:
-            self.add_lora(
-                r=config.lora_r,
-                lora_alpha=config.lora_alpha,
-                target_modules=config.lora_target_modules,
-                lora_dropout=config.lora_dropout,
-            )
+        if not self.skip_transformer_weights:
+            # Apply LoRA if specified in configuration
+            if hasattr(config, "use_lora") and config.use_lora:
+                self.add_lora(
+                    r=config.lora_r,
+                    lora_alpha=config.lora_alpha,
+                    target_modules=config.lora_target_modules,
+                    lora_dropout=config.lora_dropout,
+                )
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1058,11 +1060,12 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
     def get_output_embeddings(self):
         """Get output embeddings layer."""
-        return self.lm_head
+        return getattr(self, "lm_head", None)
 
     def set_output_embeddings(self, new_embeddings):
         """Set output embeddings layer."""
-        self.lm_head = new_embeddings
+        if hasattr(self, "lm_head"):
+            self.lm_head = new_embeddings
 
     def set_decoder(self, decoder):
         """Set the decoder model."""

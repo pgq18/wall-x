@@ -37,8 +37,12 @@ ACTION_TOKENS = 32
 
 # 默认 tensor 长度（匹配 8_test_demo.cpp 测试数据）
 DEFAULT_TEXT0_TOKENS = 22
-DEFAULT_PROPRIO_TOKENS = 7
-DEFAULT_TEXT1_TOKENS = 31
+DEFAULT_IMG0_TOKENS = 63
+DEFAULT_TEXT1_TOKENS = 7
+DEFAULT_IMG1_TOKENS = 63
+DEFAULT_TEXT2_TOKENS = 24
+DEFAULT_PROPRIO_TOKENS = 1
+DEFAULT_TEXT3_TOKENS = 6
 
 # 模型配置
 MODEL_PATH = "/home/xieqijia/Project/WALL-OSS/wall-x/workspace/libero/workspace/finetuned_new"
@@ -69,19 +73,25 @@ class FPGATransformerClient:
         host: str = "127.0.0.1",
         port: int = 8001,
         text0_tokens: int = DEFAULT_TEXT0_TOKENS,
-        proprio_tokens: int = DEFAULT_PROPRIO_TOKENS,
         text1_tokens: int = DEFAULT_TEXT1_TOKENS,
+        text2_tokens: int = DEFAULT_TEXT2_TOKENS,
+        proprio_tokens: int = DEFAULT_PROPRIO_TOKENS,
+        text3_tokens: int = DEFAULT_TEXT3_TOKENS,
         dump_dir: str = "/tmp/fpga_dump",
+        dump: bool = False
     ):
         self.host = host
         self.port = port
         self.sock: Optional[socket.socket] = None
         self.text0_tokens = text0_tokens
-        self.proprio_tokens = proprio_tokens
         self.text1_tokens = text1_tokens
+        self.text2_tokens = text2_tokens
+        self.proprio_tokens = proprio_tokens
+        self.text3_tokens = text3_tokens
         self.dump_dir = dump_dir
         os.makedirs(dump_dir, exist_ok=True)
         self._dump_idx = 0
+        self.dump = dump
 
     def connect(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -102,8 +112,10 @@ class FPGATransformerClient:
         self,
         image: np.ndarray,
         text_0: np.ndarray,
-        proprio: np.ndarray,
         text_1: np.ndarray,
+        text_2: np.ndarray,
+        proprio: np.ndarray,
+        text_3: np.ndarray,
         action: np.ndarray,
     ) -> np.ndarray:
         attrs = np.array(
@@ -111,29 +123,32 @@ class FPGATransformerClient:
                 VIT_RUN_TOKEN,
                 1184,
                 self.text0_tokens,
-                self.proprio_tokens,
                 self.text1_tokens,
+                self.text2_tokens,
+                self.proprio_tokens,
+                self.text3_tokens,
                 ACTION_TOKENS,
                 LLM_HIDDEN_DIM,
             ],
             dtype=np.uint16,
         )
         self.sock.sendall(encode_command("vla1", attrs.tobytes()))
-        for tensor in [image, text_0, proprio, text_1, action]:
+        for tensor in [image, text_0, text_1, text_2, proprio, text_3, action]:
             self.sock.sendall(tensor.astype(np.uint16).tobytes())
         result = recv_all(self.sock, ACTION_TOKENS * LLM_HIDDEN_DIM * 2)
         result_arr = np.frombuffer(result, dtype=np.uint16).reshape(ACTION_TOKENS, LLM_HIDDEN_DIM)
 
         # dump
-        d = os.path.join(self.dump_dir, f"mode1_{self._dump_idx:04d}")
-        os.makedirs(d, exist_ok=True)
-        image.tofile(os.path.join(d, "image.bin"))
-        text_0.tofile(os.path.join(d, "text_0.bin"))
-        proprio.tofile(os.path.join(d, "proprio.bin"))
-        text_1.tofile(os.path.join(d, "text_1.bin"))
-        action.tofile(os.path.join(d, "action.bin"))
-        result_arr.tofile(os.path.join(d, "result.bin"))
-        self._dump_idx += 1
+        if self.dump:
+            d = os.path.join(self.dump_dir, f"mode1_{self._dump_idx:04d}")
+            os.makedirs(d, exist_ok=True)
+            image.tofile(os.path.join(d, "image.bin"))
+            text_0.tofile(os.path.join(d, "text_0.bin"))
+            proprio.tofile(os.path.join(d, "proprio.bin"))
+            text_1.tofile(os.path.join(d, "text_1.bin"))
+            action.tofile(os.path.join(d, "action.bin"))
+            result_arr.tofile(os.path.join(d, "result.bin"))
+            self._dump_idx += 1
         return result_arr
 
     def _send_mode2(self, action: np.ndarray) -> np.ndarray:
@@ -144,11 +159,12 @@ class FPGATransformerClient:
         result_arr = np.frombuffer(result, dtype=np.uint16).reshape(ACTION_TOKENS, LLM_HIDDEN_DIM)
 
         # dump
-        d = os.path.join(self.dump_dir, f"mode2_{self._dump_idx:04d}")
-        os.makedirs(d, exist_ok=True)
-        action.tofile(os.path.join(d, "action.bin"))
-        result_arr.tofile(os.path.join(d, "result.bin"))
-        self._dump_idx += 1
+        if self.dump:
+            d = os.path.join(self.dump_dir, f"mode2_{self._dump_idx:04d}")
+            os.makedirs(d, exist_ok=True)
+            action.tofile(os.path.join(d, "action.bin"))
+            result_arr.tofile(os.path.join(d, "result.bin"))
+            self._dump_idx += 1
         return result_arr
 
     def run_transformer_on_fpga(
@@ -187,9 +203,18 @@ class FPGATransformerClient:
         # 拆分 text / image / proprio / text1 / action
         text_0 = temp_inputs_embeds[0, :img_start, :]
         image_embeds = temp_inputs_embeds[0, img_start:img_end, :]
+        text_1 = temp_inputs_embeds[0, img_start+DEFAULT_IMG0_TOKENS:img_start+DEFAULT_IMG0_TOKENS+self.text1_tokens, :]
+        text_2 = temp_inputs_embeds[0, img_end:img_end+self.text2_tokens, :]
         proprio_embeds = temp_inputs_embeds[0, propri_start:propri_start + self.proprio_tokens, :]
-        text_1 = temp_inputs_embeds[0, img_end:action_start, :]
+        text_3 = temp_inputs_embeds[0, propri_start+self.proprio_tokens:action_start, :]
         action_embeds = temp_inputs_embeds[0, action_start:action_start + ACTION_TOKENS, :]
+
+        assert text_0.shape[0] == DEFAULT_TEXT0_TOKENS, "input test_0 not matched"
+        assert text_1.shape[0] == DEFAULT_TEXT1_TOKENS, "input test_1 not matched"
+        assert text_2.shape[0] == DEFAULT_TEXT2_TOKENS, "input test_2 not matched"
+        assert proprio_embeds.shape[0] == DEFAULT_PROPRIO_TOKENS, "input proprio not matched"
+        assert text_3.shape[0] == DEFAULT_TEXT3_TOKENS, "input test_3 not matched"
+        assert action_embeds.shape[0] == ACTION_TOKENS, "input action not matched"
 
         # 对齐到 FPGA 期望的固定长度
         def pad_or_truncate(t, target_len, name):
@@ -208,6 +233,8 @@ class FPGATransformerClient:
 
         text_0 = pad_or_truncate(text_0, self.text0_tokens, "text_0")
         text_1 = pad_or_truncate(text_1, self.text1_tokens, "text_1")
+        text_2 = pad_or_truncate(text_2, self.text2_tokens, "text_2")
+        text_3 = pad_or_truncate(text_3, self.text3_tokens, "text_3")
 
         # image: FPGA 需要 [648, 1184] 的原始 patch 数据
         # 但 temp_inputs_embeds 中的 image_embeds 已经是经过 ViT 后的 [162, 2048]
@@ -224,12 +251,14 @@ class FPGATransformerClient:
             return t.detach().cpu().to(torch.float16).numpy().view(np.uint16)
 
         text_0_np = to_uint16_np(text_0)
-        proprio_np = to_uint16_np(proprio_embeds)
         text_1_np = to_uint16_np(text_1)
+        text_2_np = to_uint16_np(text_2)
+        proprio_np = to_uint16_np(proprio_embeds)
+        text_3_np = to_uint16_np(text_3)
         action_np = to_uint16_np(action_embeds)
 
         if iteration_idx == 0:
-            result = self._send_mode1(image_uint16, text_0_np, proprio_np, text_1_np, action_np)
+            result = self._send_mode1(image_uint16, text_0_np, text_1_np, text_2_np, proprio_np, text_3_np, action_np)
         else:
             result = self._send_mode2(action_np)
 

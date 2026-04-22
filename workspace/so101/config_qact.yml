@@ -5,7 +5,7 @@
 log_name: "so101_pap151_20260321"
 log_project: "vla_training"
 model_type: wall-oss
-pretrained_wallx_path: "/home/pengguanqi/Models/wall-oss-flow/"  # Must set
+pretrained_wallx_path: "/root/Models/so101_realbot_39/"  # Must set
 save_path: "/home/pengguanqi/Workspace/VLA/wall-x/workspace/so101_pap151_20260321/workspace/"                # Must set
 use_fast_tokenizer: False                       # True: train FAST, False: train Flow
 action_tokenizer_path: "/home/pengguanqi/Models/fast/"         # Must set if use_fast_tokenizer is true
@@ -56,7 +56,7 @@ agent_pos_config:
   wrist_roll.pos: 1
   gripper.pos: 1
 
-norm_stats_path: "/home/pengguanqi/Workspace/VLA/test/wall-x/workspace/so101_pap151_20260321/lerobot/so101/norm_stats.json"
+norm_stats_path: "/userdata/root/Workspace/wall-x/workspace/so101/lerobot/so101/norm_stats.json"
 
 enable_customized_robot_config: true
 customized_robot_config:
@@ -83,7 +83,7 @@ data:
   # LeRobot dataset configuration
   lerobot_config:
     repo_id: "lerobot/so101"
-    root: "/home/pengguanqi/Datasets/so101_pap151_20260321_offset"
+    root: "/root/Datasets/so101_pap151_20260321_offset"
     episodes: null
     image_transforms: null
     delta_timestamps: null

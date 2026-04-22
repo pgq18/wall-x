@@ -488,6 +488,7 @@ def load_lerobot_data(
         episodes=train_episodes,
         delta_timestamps=delta_timestamps,
         video_backend="pyav",
+        tolerance_s=lerobot_config.get("tolerance_s", 1e-4),
     )
 
     if rank == 0:
@@ -661,6 +662,7 @@ def load_test_dataset(
         delta_timestamps=delta_timestamps,
         video_backend="pyav",
         root=root,
+        tolerance_s=lerobot_config.get("tolerance_s", 1e-4),
     )
 
     print(f"Selected episodes: {dataset.episodes}")

@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import numpy as np
 import glob
@@ -1716,7 +1717,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         rope_deltas: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         second_per_grid_ts: Optional[torch.Tensor] = None,
-        num_inference_timesteps: Optional[int] = 10,
+        num_inference_timesteps: Optional[int] = 3,
         dataset_names: Optional[str] = None,
         dof_mask: Optional[torch.FloatTensor] = None,
         agent_pos_mask: Optional[torch.FloatTensor] = None,
@@ -1797,8 +1798,11 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         )
 
         # Process input embeddings with multi-modal data
+        _embed_timing = {}
         if inputs_embeds is None:
+            _t0 = time.perf_counter()
             inputs_embeds = self.model.embed_tokens(input_ids)
+            _embed_timing["embed_tokens"] = time.perf_counter() - _t0
 
             # Process image embeddings (skip when using FPGA — FPGA runs ViT internally)
             if pixel_values is not None and not self.skip_transformer_weights:
@@ -1854,12 +1858,14 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 agent_pos_mask = agent_pos_mask.to(inputs_embeds.device).to(
                     inputs_embeds.dtype
                 )
+                _t0 = time.perf_counter()
                 proprio_embed = self.action_preprocessor.proprioception_proj(
                     proprioception,
                     dataset_names,
                     agent_pos_mask,
                     use_history=proprioception.shape[1] > 1,
                 )
+                _embed_timing["proprio_proj"] = time.perf_counter() - _t0
                 proprioception_mask = (
                     input_ids == self.action_token_id_set["propri_token_id"]
                 )
@@ -2051,6 +2057,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
         # Handle diffusion-based action prediction
         if predict_mode == "diffusion":
+            timing = dict(_embed_timing)  # Include embed_tokens + proprio_proj timing
+
             # Initialize with random noise
             noisy_action = torch.randn(
                 size=(batch_size, pred_horizon, action_dim),
@@ -2092,10 +2100,13 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
                 # Prepare timestep for batch processing
                 timestep = timestep.unsqueeze(0).repeat(noisy_action.shape[0])
+
+                t0 = time.perf_counter()
                 action_embed = self.action_preprocessor.step(
                     timestep=timestep, noisy_action=noisy_action, dof_mask=dof_mask
                 )
                 action_embed = action_embed.reshape(-1, inputs_embeds.shape[-1])
+                timing["action_preprocessor.step"] = timing.get("action_preprocessor.step", 0) + (time.perf_counter() - t0)
 
                 # Create temporary copy of embeddings for thread safety
                 temp_inputs_embeds = inputs_embeds.clone()
@@ -2108,13 +2119,16 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                         "but no fpga_client was provided. Transformer/ViT weights are not available."
                     )
                 elif fpga_client is not None:
+                    t0 = time.perf_counter()
                     action_hidden_states = fpga_client.run_transformer_on_fpga(
                         temp_inputs_embeds, input_ids, action_mask, fpga_iter_idx[0]
                     )
                     action_hidden_states = action_hidden_states.to(dtype=inputs_embeds.dtype)
                     fpga_iter_idx[0] += 1
+                    timing["fpga_inference"] = timing.get("fpga_inference", 0) + (time.perf_counter() - t0)
                 else:
                     # Forward pass through transformer
+                    t0 = time.perf_counter()
                     transformer_outputs = self.model(
                         input_ids=None,
                         attention_mask=attention_mask,
@@ -2133,8 +2147,11 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     hidden_states = transformer_outputs.last_hidden_state
                     action_mask = input_ids == self.action_token_id_set["action_token_id"]
                     action_hidden_states = hidden_states[action_mask]
+                    timing["transformer_forward"] = timing.get("transformer_forward", 0) + (time.perf_counter() - t0)
 
+                t0 = time.perf_counter()
                 pred = self.action_preprocessor.action_proj_back(action_hidden_states)
+                timing["action_proj_back"] = timing.get("action_proj_back", 0) + (time.perf_counter() - t0)
                 return pred.reshape(batch_size, pred_horizon, action_dim)
 
             # Perform ODE integration for diffusion sampling
@@ -2145,16 +2162,28 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 device=inputs_embeds.device,
                 dtype=inputs_embeds.dtype,
             )
+            t_ode = time.perf_counter()
             action_trajectory = odeint(step, noisy_action, times, method="euler")
+            timing["odeint_total"] = time.perf_counter() - t_ode
 
             # Extract final predicted action and unnormalize
             predict_action = action_trajectory[-1]
+            t0 = time.perf_counter()
             predict_action = (
                 self.action_preprocessor.normalizer_action.unnormalize_data(
                     predict_action, dataset_names
                 )
             )
+            timing["unnormalize"] = time.perf_counter() - t0
             output["predict_action"] = predict_action
+
+            # Print timing breakdown
+            total_measured = sum(timing.values())
+            print(f"\n--- Diffusion Timing Breakdown (ms) ---")
+            for name, elapsed in timing.items():
+                print(f"  {name}: {elapsed * 1000:.1f} ms")
+            print(f"  TOTAL (measured): {total_measured * 1000:.1f} ms")
+            print(f"----------------------------------------\n")
 
             # Process ground truth actions if available
             if action_chunk is not None:

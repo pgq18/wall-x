@@ -7,6 +7,8 @@ python launch_server.py \
   --rtc-s 16 \
   --rtc-d 10 \
   --rtc-action-horizon 32 \
+  --fpga-host 192.168.50.40 \
+  --fpga-port 8001 \
    model-config:model-config \
   --model-config.model-path /root/Models/so101_realbot_39 \
   --model-config.train-config-path /userdata/root/Workspace/wall-x/workspace/so101/config_qact.yml \
@@ -15,4 +17,4 @@ python launch_server.py \
   --model-config.state_dim 6 \
   --model-config.camera-key "['face_view', 'left_wrist_view']" \
   --model-config.input-image-resolution 256 \
-  --model-config.skip-transformer-weights
+  --model-config.skip-transformer-weights \

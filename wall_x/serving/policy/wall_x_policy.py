@@ -53,6 +53,8 @@ class WallXPolicy(BasePolicy):
         norm_stats_path: str = "data/norm_stats.json",
         dataset_name: str = "lerobot/libero_goal_image",
         skip_transformer_weights: bool = False,
+        fpga_host: str | None = None,
+        fpga_port: int = 8001,
     ):
         """Initialize the Wall-X policy.
 
@@ -98,7 +100,8 @@ class WallXPolicy(BasePolicy):
         self.action_dim = action_dim
         self.agent_pos_dim = agent_pos_dim
         self.pred_horizon = pred_horizon
-        self.device = device
+        # On ARM edge devices without CUDA, force device to CPU
+        self.device = "cpu" if skip_transformer_weights else device
         self.predict_mode = predict_mode
         self.default_prompt = default_prompt
         self.camera_key = camera_key
@@ -120,12 +123,21 @@ class WallXPolicy(BasePolicy):
         self.processor = AutoProcessor.from_pretrained(model_path, use_fast=True)
         self.processor.tokenizer.padding_side = "left"
 
+        # Initialize FPGA client if needed (lazy import to avoid circular dependency)
+        self.fpga_client = None
+        if skip_transformer_weights and fpga_host is not None:
+            from fpga_vla_client import FPGATransformerClient
+            logger.info(f"Connecting to FPGA transformer server at {fpga_host}:{fpga_port}...")
+            self.fpga_client = FPGATransformerClient(host=fpga_host, port=fpga_port)
+            self.fpga_client.connect()
+            logger.info("FPGA client connected successfully")
+
         # Action buffer for multi-step predictions
         self.action_buffer = []
         self.buffer_index = 0
 
         logger.info(
-            f"Model loaded successfully. Device: {device}, Action dim: {action_dim}, Horizon: {pred_horizon}"
+            f"Model loaded successfully. Device: {self.device}, Action dim: {action_dim}, Horizon: {pred_horizon}"
         )
 
     @property
@@ -142,6 +154,8 @@ class WallXPolicy(BasePolicy):
         """Reset the policy state."""
         self.action_buffer = []
         self.buffer_index = 0
+        if self.fpga_client is not None:
+            self.fpga_client.set_cached_image(None)
         logger.debug("Policy reset")
 
     def infer(self, obs: Dict, prev_action=None, is_rtc: bool = False) -> Dict:
@@ -216,6 +230,12 @@ class WallXPolicy(BasePolicy):
                 else:
                     prev_action_tensor = x_real
 
+            # Cache pixel_values for FPGA mode1 (first iteration needs raw image data)
+            if self.fpga_client is not None:
+                pixel_values = input_batch.get("pixel_values")
+                if pixel_values is not None:
+                    self.fpga_client.set_cached_image(pixel_values)
+
             if not self.fake_inference:
                 with torch.no_grad():
                     outputs = self.model(
@@ -232,6 +252,7 @@ class WallXPolicy(BasePolicy):
                         rtc_s=self.rtc_s,
                         rtc_d=self.rtc_d,
                         rtc_beta=self.rtc_beta,
+                        fpga_client=self.fpga_client,
                     )
 
                 if outputs["predict_action"] is None:

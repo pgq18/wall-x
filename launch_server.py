@@ -143,6 +143,12 @@ class Args:
     # RTC: action horizon for the broker
     rtc_action_horizon: int = 32
 
+    # FPGA transformer server host (used when skip_transformer_weights=True)
+    fpga_host: str = "192.168.50.40"
+
+    # FPGA transformer server port
+    fpga_port: int = 8001
+
 
 # Default model configurations for each environment
 DEFAULT_CONFIGS: dict[EnvMode, ModelConfig] = {
@@ -225,6 +231,8 @@ def create_policy(args: Args) -> WallXPolicy:
         norm_stats_path=config.norm_stats_path,
         dataset_name=train_config.get("data", {}).get("lerobot_config", {}).get("repo_id"),
         skip_transformer_weights=config.skip_transformer_weights,
+        fpga_host=args.fpga_host,
+        fpga_port=args.fpga_port,
     )
 
     return policy

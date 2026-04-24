@@ -35,6 +35,7 @@ class WallXPolicy(BasePolicy):
         rtc_s: int = 16,
         rtc_d: int = 8,
         rtc_beta: float = 8.0,
+        debug_tokens: bool = False,
     ):
         """Initialize the Wall-X policy.
 
@@ -63,6 +64,7 @@ class WallXPolicy(BasePolicy):
         self.model = self.model.to(device)
 
         self.model = self.model.bfloat16()
+        self.model.debug_token_info = debug_tokens
 
         # hard code the action dim to 20 for align to wall-x configuration
         self.fixed_action_dim = 20

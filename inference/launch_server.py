@@ -88,6 +88,8 @@ class ModelConfig:
     input_image_resolution: int | None = None
     # Path to norm_stats.json (overrides train_config_path setting if provided)
     norm_stats_path: str | None = None
+    # Print token composition debug info on first inference
+    debug_tokens: bool = False
 
     def __post_init__(self):
         """Parse camera_key if it's a string representation of a list."""
@@ -216,6 +218,7 @@ def create_policy(args: Args) -> WallXPolicy:
         input_image_resolution=config.input_image_resolution,
         rtc_s=args.rtc_s,
         rtc_d=args.rtc_d,
+        debug_tokens=config.debug_tokens,
     )
 
     return policy

@@ -23,6 +23,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--pred_horizon", type=int, default=32)
     parser.add_argument("--origin_action_dim", type=int, default=7)
+    parser.add_argument("--debug-tokens", action="store_true", help="Print token composition debug info")
     args = parser.parse_args()
 
     origin_action_dim = args.origin_action_dim
@@ -42,6 +43,7 @@ if __name__ == "__main__":
     model.eval()
     model = model.to("cuda")
     model = model.bfloat16()
+    model.debug_token_info = args.debug_tokens
 
     # get test dataloader
     dataload_config = get_data_configs(config["data"])

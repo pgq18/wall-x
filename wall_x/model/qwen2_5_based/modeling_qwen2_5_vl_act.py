@@ -1,4 +1,5 @@
 import os
+import itertools
 import torch
 import numpy as np
 import glob
@@ -946,6 +947,59 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         # Initialize weights and apply final processing
         self.post_init()
 
+    def debug_print_token_info(self, input_ids):
+        """Debug: analyze and print input token composition."""
+        ids = input_ids[0].cpu().tolist()
+
+        special_tokens = {
+            "<|im_start|>": self.processor.tokenizer.convert_tokens_to_ids("<|im_start|>"),
+            "<|im_end|>": self.processor.tokenizer.convert_tokens_to_ids("<|im_end|>"),
+            "<|vision_start|>": self.config.vision_start_token_id,
+            "<|vision_end|>": self.config.vision_end_token_id,
+            "<|image_pad|>": self.config.image_token_id,
+            "<|video_pad|>": self.config.video_token_id,
+            "<|action|>": self.action_token_id_set["action_token_id"],
+            "<|action_fast|>": self.processor.tokenizer.convert_tokens_to_ids("<|action_fast|>"),
+            "<|propri|>": self.action_token_id_set["propri_token_id"],
+        }
+
+        total = len(ids)
+        print(f"\n{'='*60}")
+        print(f"[DEBUG Token Analysis] Total tokens: {total}")
+        print(f"{'='*60}")
+
+        special_counts = {}
+        for name, tid in special_tokens.items():
+            count = ids.count(tid)
+            if count > 0:
+                special_counts[name] = count
+                print(f"  {name}: {count} tokens (token_id={tid})")
+
+        total_special = sum(special_counts.values())
+        text_count = total - total_special
+        print(f"  [text tokens]: {text_count} tokens")
+        print(f"  [special tokens total]: {total_special} tokens")
+
+        token_map = {v: k for k, v in special_tokens.items()}
+        sequence = []
+        for token_id in ids:
+            if token_id in token_map:
+                sequence.append(token_map[token_id])
+            else:
+                sequence.append("[text]")
+
+        compressed = []
+        for name, group in itertools.groupby(sequence):
+            length = len(list(group))
+            if length > 1:
+                compressed.append(f"{name}×{length}")
+            else:
+                compressed.append(name)
+
+        print(f"\n  Token sequence structure:")
+        print(f"  {' → '.join(compressed)}")
+        print(f"{'='*60}\n")
+
     def define_action_token_id(self):
         """
         Define action token IDs based on tokenizer configuration.
@@ -1814,6 +1868,11 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
+
+        # Debug: print token composition (only once when flag is set)
+        if getattr(self, 'debug_token_info', False) and not getattr(self, '_debug_token_printed', False):
+            self.debug_print_token_info(input_ids)
+            self._debug_token_printed = True
 
         # Calculate RoPE position IDs if not provided
         # Note: Cannot calculate rope deltas with 4D attention mask. TODO: Fix this limitation

@@ -13,3 +13,4 @@ matplotlib
 tyro
 msgpack-numpy
 websockets
+numpydantic

@@ -18,14 +18,17 @@ def load_config(config_path):
     return config
 
 
-def load_lerobot_dataset(repo_id, action_horizon, args):
-    dataset_meta = LeRobotDatasetMetadata(repo_id)
+def load_lerobot_dataset(repo_id, dataset_root, action_horizon, tolerance_s, args):
+    dataset_meta = LeRobotDatasetMetadata(repo_id, root=dataset_root)
     dataset = LeRobotDataset(
         repo_id,
+        root=dataset_root,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)]
             for key in [KEY_MAPPINGS[repo_id]["action"]]
         },
+        tolerance_s=tolerance_s,
+        video_backend="pyav",
     )
     num_batches = len(dataset) // args.batch_size
     generator = torch.Generator()
@@ -56,10 +59,12 @@ if __name__ == "__main__":
     config = load_config(path)
     lerobot_config = config["data"]["lerobot_config"]
     repo_id = lerobot_config.get("repo_id", None)
+    dataset_root = lerobot_config.get("root", None)
     assert repo_id is not None, "repo id is required"
     action_horizon = config["data"].get("action_horizon", 32)
+    tolerance_s = lerobot_config.get("tolerance_s", 1e-4)
 
-    data_loader, num_batches = load_lerobot_dataset(repo_id, action_horizon, args)
+    data_loader, num_batches = load_lerobot_dataset(repo_id, dataset_root, action_horizon, tolerance_s, args)
 
     keys = ["state", "action"]
     stats = {key: normalize.RunningStats() for key in keys}

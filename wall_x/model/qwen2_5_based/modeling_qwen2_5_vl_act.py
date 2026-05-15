@@ -2181,9 +2181,25 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             output["predict_action"] = predict_action
 
             # Print timing breakdown
-            total_measured = sum(timing.values())
+            # odeint_total already includes action_preprocessor.step, fpga_inference, and action_proj_back
+            outer_timing = {
+                "embed_tokens": timing.get("embed_tokens", 0),
+                "proprio_proj": timing.get("proprio_proj", 0),
+                "odeint_total": timing.get("odeint_total", 0),
+                "  action_preprocessor.step (inside odeint)": timing.get("action_preprocessor.step", 0),
+                "  fpga_inference (inside odeint)": timing.get("fpga_inference", 0),
+                "  action_proj_back (inside odeint)": timing.get("action_proj_back", 0),
+                "  odeint_overhead": (
+                    timing.get("odeint_total", 0)
+                    - timing.get("action_preprocessor.step", 0)
+                    - timing.get("fpga_inference", 0)
+                    - timing.get("action_proj_back", 0)
+                ),
+                "unnormalize": timing.get("unnormalize", 0),
+            }
+            total_measured = outer_timing["embed_tokens"] + outer_timing["proprio_proj"] + outer_timing["odeint_total"] + outer_timing["unnormalize"]
             print(f"\n--- Diffusion Timing Breakdown (ms) ---")
-            for name, elapsed in timing.items():
+            for name, elapsed in outer_timing.items():
                 print(f"  {name}: {elapsed * 1000:.1f} ms")
             print(f"  TOTAL (measured): {total_measured * 1000:.1f} ms")
             print(f"----------------------------------------\n")

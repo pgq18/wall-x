@@ -25,7 +25,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--pred_horizon", type=int, default=32)
     parser.add_argument("--origin_action_dim", type=int, default=6)
-    parser.add_argument("--fpga-host", type=str, default="192.168.50.40")
+    parser.add_argument("--fpga-host", type=str, default="127.0.0.1")
     parser.add_argument("--fpga-port", type=int, default=8001)
     args = parser.parse_args()
 

@@ -4,7 +4,7 @@ export CUDA_VISIBLE_DEVICES=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 python ${SCRIPT_DIR}/launch_server.py \
-  --port 7999 \
+  --port 8002 \
   --env LIBERO \
   model-config:model-config \
   --model-config.model-path /home/pengguanqi/Workspace/VLA/test/wall-x/workspace/so101_pap151_20260321/workspace/39 \

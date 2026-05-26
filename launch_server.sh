@@ -7,7 +7,7 @@ python launch_server.py \
   --rtc-s 16 \
   --rtc-d 10 \
   --rtc-action-horizon 32 \
-  --fpga-host 192.168.50.40 \
+  --fpga-host 127.0.0.1 \
   --fpga-port 8001 \
    model-config:model-config \
   --model-config.model-path /root/Models/so101_realbot_39 \

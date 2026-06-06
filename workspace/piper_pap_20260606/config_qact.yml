@@ -123,7 +123,7 @@ data:
           weight: 1.0
           type: RandomAffine
           kwargs:
-            degrees: [-5.0, 5.0]
+            degrees: [-3.0, 3.0]
             translate: [0.05, 0.05]
     delta_timestamps: null
     tolerance_s: 0.04

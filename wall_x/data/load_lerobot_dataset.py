@@ -6,6 +6,11 @@ import numpy as np
 import torch
 from torch.utils.data import DistributedSampler, random_split
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+from lerobot.datasets.transforms import (
+    ImageTransformConfig,
+    ImageTransforms,
+    ImageTransformsConfig,
+)
 from typing import Protocol, SupportsIndex, TypeVar
 from qwen_vl_utils.vision_process import smart_resize
 from wall_x.data.config import X2RDataProcessingConfig
@@ -20,6 +25,26 @@ from transformers import AutoProcessor
 from .utils import load_norm_stats, KEY_MAPPINGS
 
 T_co = TypeVar("T_co", covariant=True)
+
+
+def build_image_transforms(image_transforms_config):
+    if not image_transforms_config or not image_transforms_config.get("enable", False):
+        return None
+
+    config_kwargs = {
+        "enable": image_transforms_config.get("enable", False),
+        "max_num_transforms": image_transforms_config.get("max_num_transforms", 3),
+        "random_order": image_transforms_config.get("random_order", False),
+    }
+
+    transform_configs = image_transforms_config.get("tfs")
+    if transform_configs is not None:
+        config_kwargs["tfs"] = {
+            name: ImageTransformConfig(**transform_config)
+            for name, transform_config in transform_configs.items()
+        }
+
+    return ImageTransforms(ImageTransformsConfig(**config_kwargs))
 
 
 # Abstract class for dataset
@@ -481,12 +506,14 @@ def load_lerobot_data(
     train_test_split = dataload_config.get("train_test_split", 0.95)
     train_episodes = episodes[: int(episodes_num * train_test_split)]
     test_episodes = episodes[int(episodes_num * train_test_split) :]
+    image_transforms = build_image_transforms(lerobot_config.get("image_transforms"))
 
     train_dataset = LeRobotDataset(
         repo_id,
         root=root,
         episodes=train_episodes,
         delta_timestamps=delta_timestamps,
+        image_transforms=image_transforms,
         video_backend="pyav",
         tolerance_s=lerobot_config.get("tolerance_s", 0.0001),
     )

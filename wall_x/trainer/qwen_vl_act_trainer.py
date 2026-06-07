@@ -692,6 +692,7 @@ class QwenVlAct_Trainer:
             self.dataload_config.get("lerobot_config", {}),
             rank=self.rank,
             world_size=self.world_size,
+            seed=self.seed,
         )
 
     @timer

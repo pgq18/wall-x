@@ -9,7 +9,7 @@ pretrained_wallx_path: "/home/pengguanqi/Models/wall-oss-flow/"  # Must set
 save_path: "/home/pengguanqi/Workspace/VLA/test/wall-x/workspace/piper_pap_20260606/workspace/"                # Must set
 use_fast_tokenizer: False                       # True: train FAST, False: train Flow
 action_tokenizer_path: "/home/pengguanqi/Models/fast/"         # Must set if use_fast_tokenizer is true
-use_flash_attn: True
+use_flash_attn: False
 
 # Torch Profile
 profile: False

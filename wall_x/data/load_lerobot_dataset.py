@@ -501,7 +501,8 @@ def load_lerobot_data(
         ],
     }
     batch_size = config.get("batch_size_per_gpu", 8)
-    episodes = np.arange(episodes_num).tolist()
+    split_seed = config.get("data", {}).get("split_seed", seed)
+    episodes = np.random.default_rng(split_seed).permutation(episodes_num).tolist()
 
     train_test_split = dataload_config.get("train_test_split", 0.95)
     train_episodes = episodes[: int(episodes_num * train_test_split)]

@@ -1,1 +1,12 @@
-
+[submodule "3rdparty/cutlass"]
+	path = 3rdparty/cutlass
+	url = https://github.com/NVIDIA/cutlass.git
+[submodule "Tools"]
+	path = Tools
+	url = https://github.com/pgq18/Tools.git
+[submodule "lerobot"]
+	path = lerobot
+	url = https://github.com/huggingface/lerobot.git
+[submodule "openpi-rtc"]
+	path = openpi-rtc
+	url = https://github.com/EII-Tokyo/openpi-rtc.git

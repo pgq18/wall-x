@@ -5,7 +5,8 @@
 log_name: "piper_pap_20260606"
 log_project: "vla_training"
 model_type: wall-oss
-pretrained_wallx_path: "/home/pengguanqi/Models/wall-oss-flow/"  # Must set
+# pretrained_wallx_path: "/home/pengguanqi/Models/wall-oss-flow/"  # Must set
+pretrained_wallx_path: "/home/pengguanqi/Workspace/VLA/test/wall-x/workspace/piper_pap_20260606/workspace/test1_s0/5/"  # Must set
 save_path: "/home/pengguanqi/Workspace/VLA/test/wall-x/workspace/piper_pap_20260606/workspace/"                # Must set
 use_fast_tokenizer: False                       # True: train FAST, False: train Flow
 action_tokenizer_path: "/home/pengguanqi/Models/fast/"         # Must set if use_fast_tokenizer is true
@@ -34,9 +35,9 @@ FSDP2: False
 torch_compile: False
 
 # # Checkpoint resuming configuration
-# resume:
-#   ckpt: "/home/pengguanqi/Workspace/VLA/wall-x/workspace/lerobot_libero/workspace/test3/11/"
-#   load_ckpt_only: true
+resume:
+  ckpt: "/home/pengguanqi/Workspace/VLA/test/wall-x/workspace/piper_pap_20260606/workspace/test1_s0/5/"
+  load_ckpt_only: true
 
 # Robot configuration - Define degrees of freedom for each component
 dof_config:
@@ -133,7 +134,7 @@ data:
     video_backend: null
 
   action_horizon: 32
-  train_test_split: 0.95
+  train_test_split: 0.98
 
   # Action keys for observation and prediction
   obs_action_keys:

@@ -1,8 +1,9 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import yaml
 import torch
 import argparse
+import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl_act import Qwen2_5_VLMoEForAction
@@ -23,6 +24,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--pred_horizon", type=int, default=32)
     parser.add_argument("--origin_action_dim", type=int, default=7)
+    parser.add_argument("--episode", type=int, default=0)
     parser.add_argument("--debug-tokens", action="store_true", help="Print token composition debug info")
     args = parser.parse_args()
 
@@ -48,21 +50,21 @@ if __name__ == "__main__":
     # get test dataloader
     dataload_config = get_data_configs(config["data"])
     lerobot_config = dataload_config.get("lerobot_config", {})
-    dataset = load_test_dataset(config, lerobot_config, seed=42, episode=0)
+    dataset = load_test_dataset(config, lerobot_config, seed=42, episode=args.episode)
     dataloader = dataset.get_dataloader()
 
     total_frames = len(dataloader)
 
     predict_mode = "fast" if config.get("use_fast_tokenizer", False) else "diffusion"
     action_dim = 20 if predict_mode == "diffusion" else origin_action_dim
-    gt_traj = torch.zeros((total_frames, origin_action_dim))
-    pred_traj = torch.zeros((total_frames, origin_action_dim))
+    gt_traj = torch.full((total_frames, origin_action_dim), float("nan"))
+    pred_traj = torch.full((total_frames, origin_action_dim), float("nan"))
 
     # use tqdm to show the progress
     for idx, batch in tqdm(
         enumerate(dataloader), total=total_frames, desc="predicting"
     ):
-        if idx % pred_horizon == 0 and idx + pred_horizon < total_frames:
+        if idx % pred_horizon == 0 and idx + pred_horizon <= total_frames:
             batch = batch.to("cuda")
             with torch.no_grad():
                 outputs = model(
@@ -95,6 +97,27 @@ if __name__ == "__main__":
     pred_traj_np = pred_traj.numpy()
 
     timesteps = gt_traj.shape[0]
+    valid_gt = ~np.isnan(gt_traj_np).any(axis=1)
+    valid_pred = ~np.isnan(pred_traj_np).any(axis=1)
+
+    print(f"Episode: {args.episode}")
+    print(f"Total frames: {total_frames}")
+    print(f"Plotted GT frames: {valid_gt.sum()}/{total_frames}")
+    print(f"Plotted prediction frames: {valid_pred.sum()}/{total_frames}")
+    for name, traj, valid in (
+        ("GT", gt_traj_np, valid_gt),
+        ("Prediction", pred_traj_np, valid_pred),
+    ):
+        if not valid.any():
+            print(f"{name}: no valid frames")
+            continue
+        valid_traj = traj[valid]
+        traj_min = np.nanmin(valid_traj, axis=0)
+        traj_max = np.nanmax(valid_traj, axis=0)
+        traj_ptp = traj_max - traj_min
+        print(f"{name} min: {np.round(traj_min, 4).tolist()}")
+        print(f"{name} max: {np.round(traj_max, 4).tolist()}")
+        print(f"{name} ptp: {np.round(traj_ptp, 4).tolist()}")
 
     fig, axs = plt.subplots(
         origin_action_dim, 1, figsize=(15, 5 * origin_action_dim), sharex=True
@@ -111,7 +134,7 @@ if __name__ == "__main__":
     axs[-1].set_xlabel("Timestep")
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, "lerobot_comparison.png")
+    save_path = os.path.join(save_dir, f"lerobot_comparison_{args.episode}.png")
     plt.savefig(save_path)
     print(f"Saved plot to {save_path}")
     plt.close()

@@ -47,6 +47,25 @@ def build_image_transforms(image_transforms_config):
     return ImageTransforms(ImageTransformsConfig(**config_kwargs))
 
 
+def split_lerobot_episodes(episodes_num, train_test_split=0.95, split_seed=42):
+    """
+    Deterministically split episode ids into train/test sets with a seeded shuffle.
+    This keeps held-out test episodes distributed across the dataset instead of
+    always taking the final contiguous episodes.
+    """
+    if not 0 < train_test_split < 1:
+        raise ValueError(
+            f"train_test_split must be between 0 and 1, got {train_test_split}"
+        )
+    if episodes_num < 2:
+        raise ValueError(f"episodes_num must be at least 2, got {episodes_num}")
+
+    episodes = np.random.default_rng(split_seed).permutation(episodes_num).tolist()
+    train_count = int(episodes_num * train_test_split)
+    train_count = min(max(train_count, 1), episodes_num - 1)
+    return episodes[:train_count], episodes[train_count:]
+
+
 # Abstract class for dataset
 class Dataset(Protocol[T_co]):
     """Interface for a dataset with random access."""
@@ -70,8 +89,16 @@ class PreprocessedDataset(Dataset[T_co]):
         rank=0,
         world_size=1,
         test_only=False,
+        train_episodes=None,
+        test_episodes=None,
+        split_seed=None,
+        train_test_split=None,
     ):
         self.hf_dataset = dataset
+        self.train_episodes = train_episodes
+        self.test_episodes = test_episodes
+        self.split_seed = split_seed
+        self.train_test_split = train_test_split
 
         if test_only:
             self._dataset = dataset
@@ -502,14 +529,13 @@ def load_lerobot_data(
     }
     batch_size = config.get("batch_size_per_gpu", 8)
     split_seed = config.get("data", {}).get("split_seed", seed)
-    episodes = np.random.default_rng(split_seed).permutation(episodes_num).tolist()
-
     train_test_split = dataload_config.get("train_test_split", 0.95)
-    train_episodes = episodes[: int(episodes_num * train_test_split)]
-    test_episodes = episodes[int(episodes_num * train_test_split) :]
+    train_episodes, test_episodes = split_lerobot_episodes(
+        episodes_num, train_test_split=train_test_split, split_seed=split_seed
+    )
     image_transforms = build_image_transforms(lerobot_config.get("image_transforms"))
 
-    train_dataset = LeRobotDataset(
+    train_dataset = FixedLeRobotDataset(
         repo_id,
         root=root,
         episodes=train_episodes,
@@ -534,6 +560,10 @@ def load_lerobot_data(
         seed=seed,
         rank=rank,
         world_size=world_size,
+        train_episodes=train_episodes,
+        test_episodes=test_episodes,
+        split_seed=split_seed,
+        train_test_split=train_test_split,
     )
 
     # Calculate samples per process

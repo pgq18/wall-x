@@ -207,6 +207,9 @@ bin/
 fuse.cfg
 ray/auth.json
 
+# Local external checkout
+openpi-rtc/
+
 # AI/ML related
 *.ai
 

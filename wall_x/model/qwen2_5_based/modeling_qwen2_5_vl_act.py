@@ -879,31 +879,45 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         # Resize token embeddings to match processor tokenizer vocabulary size
         model.resize_token_embeddings(len(processor.tokenizer))
 
-        # Load model state dict from safetensors file
-        safetensor_files = glob.glob(
-            os.path.join(pretrained_model_path, "*.safetensors")
-        )
-        state_dict = {}
-        for file in safetensor_files:
-            sd = load_file(file, device="cpu")
-            # filter normalizer statistic params
-            del_keys = []
-            for key in sd.keys():
-                if "action_preprocessor.normalizer" in key:
-                    print(f"filter load model weight {key}")
-                    del_keys.append(key)
-            for key in del_keys:
-                del sd[key]
-            state_dict.update(sd)
+        # In FPGA mode, prefer a pre-extracted partial weights file so we avoid
+        # loading the full multi-GB safetensors checkpoint just to discard most of it.
+        skipped_weights_file = os.path.join(pretrained_model_path, "skipped_weights.pt")
+        if skip_transformer_weights and os.path.exists(skipped_weights_file):
+            print(f"[skip_transformer_weights] Loading partial weights from {skipped_weights_file}")
+            state_dict = torch.load(
+                skipped_weights_file, map_location="cpu", weights_only=True
+            )
+            assert "model.embed_tokens.weight" in state_dict, (
+                "skipped_weights.pt is missing model.embed_tokens.weight — "
+                "regenerate it with the embed_tokens key"
+            )
+            print(f"[skip_transformer_weights] Loaded {len(state_dict)} keys: {list(state_dict.keys())}")
+        else:
+            # Fall back to loading the full safetensors checkpoint and filtering.
+            safetensor_files = glob.glob(
+                os.path.join(pretrained_model_path, "*.safetensors")
+            )
+            state_dict = {}
+            for file in safetensor_files:
+                sd = load_file(file, device="cpu")
+                # filter normalizer statistic params
+                del_keys = []
+                for key in sd.keys():
+                    if "action_preprocessor.normalizer" in key:
+                        print(f"filter load model weight {key}")
+                        del_keys.append(key)
+                for key in del_keys:
+                    del sd[key]
+                state_dict.update(sd)
 
-        # Skip heavy transformer/ViT weights when using FPGA for inference
-        if skip_transformer_weights:
-            skip_prefixes = ("model.layers.", "model.norm.", "visual.", "lm_head.")
-            state_dict = {
-                k: v for k, v in state_dict.items()
-                if not any(k.startswith(p) for p in skip_prefixes)
-            }
-            print(f"skip_transformer_weights=True: filtered out keys with prefixes {skip_prefixes}")
+            # Skip heavy transformer/ViT weights when using FPGA for inference
+            if skip_transformer_weights:
+                skip_prefixes = ("model.layers.", "model.norm.", "visual.", "lm_head.")
+                state_dict = {
+                    k: v for k, v in state_dict.items()
+                    if not any(k.startswith(p) for p in skip_prefixes)
+                }
+                print(f"skip_transformer_weights=True: filtered out keys with prefixes {skip_prefixes}")
 
         model.load_state_dict(state_dict, strict=False)
 

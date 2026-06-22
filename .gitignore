@@ -270,3 +270,4 @@ NOTES.md
 .env.*.local
 
 extracted_samples
+weight

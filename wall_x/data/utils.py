@@ -48,6 +48,14 @@ KEY_MAPPINGS = {
         "state": "observation.state",
         "action": "action",
     },
+    "lerobot/piper": {
+        "camera": {
+            "observation.images.up": "face_view",
+            "observation.images.wrist": "left_wrist_view",
+        },
+        "state": "observation.state",
+        "action": "action",
+    },
 }
 
 CAMERA_NAME_MAPPING = {

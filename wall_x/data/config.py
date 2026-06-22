@@ -40,6 +40,7 @@ ACTION_DATASET_NAMES = [
     "lerobot/aloha_mobile_cabinet",
     "lerobot/libero_goal_image",
     "lerobot/so101",
+    "lerobot/piper",
 ]
 
 # Supported multimodal datasets

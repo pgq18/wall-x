@@ -88,7 +88,7 @@ data:
   # LeRobot dataset configuration
   lerobot_config:
     repo_id: "lerobot/piper"
-    root: "/home/pengguanqi/Datasets/piper_pap_20260606_offset"
+    root: "/home/pengguanqi/Datasets/piper_pap_20260606_20260629_offset_merged"
     episodes: null
     image_transforms:
       enable: true

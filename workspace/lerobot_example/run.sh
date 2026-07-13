@@ -20,4 +20,9 @@ export SCRIPT_ARGS="--config ${config_path}/config_qact.yml --seed $MASTER_PORT"
 
 echo "Running command: $LAUNCHER $SCRIPT $SCRIPT_ARGS"
 
-$LAUNCHER $SCRIPT $SCRIPT_ARGS
+# Create logs directory and save output with timestamp
+LOG_DIR="${config_path}/logs"
+mkdir -p $LOG_DIR
+LOG_FILE="${LOG_DIR}/train_$(date +'%Y%m%d_%H%M%S').log"
+
+$LAUNCHER $SCRIPT $SCRIPT_ARGS 2>&1 | tee $LOG_FILE

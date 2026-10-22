@@ -29,6 +29,34 @@ By creating a direct feedback loop between the model's decisions and the body's 
 ## Repository
 This repository provides the training and inference code that supports our WALL series open-source embodied foundation models. It includes end-to-end pipelines for data preparation (LeRobot), model configuration, flow-matching and FAST action branches, and evaluation utilities for real and simulated robots.
 
+### PressB integration in this fork
+
+This fork also serves frozen Wall-X policies to the PiPER pick-and-place task in
+[PressB](https://github.com/pgq18/PressB). The simulator sends third-person and
+wrist RGB images, measured joint positions, and a language instruction over
+WebSocket; Wall-X returns a 32-step action chunk. Simulation, optional action
+smoothing, and task evaluation are implemented in PressB.
+
+- [RTX 5090 installation and PiPER launch guide](inference/README_rtx5090.md):
+  separate Python 3.10 environment, CUDA 12.8 build, checkpoint statistics,
+  observation/action units, and deployment validation.
+- [Backward-compatible transport extension](inference/README_pressb.md):
+  existing observation and RTC requests, optional split-inference RPC, and
+  optional API-key authentication. The RPC hook does not itself implement
+  split inference for a Wall-X checkpoint.
+
+When checked out at `PressB/ref/wall-x`, run these commands from the PressB root:
+
+```bash
+bash ref/wall-x/inference/install_rtx5090.sh
+CUDA_VISIBLE_DEVICES=0 bash ref/wall-x/inference/launch_server_piper_local.sh
+```
+
+The local launcher defaults to `ws://127.0.0.1:8094`. Supply your own checkpoint
+and matching normalizer using `WALLX_MODEL` and `WALLX_STATS`; neither weights,
+datasets, nor the Conda environment are distributed with this repository.
+The upstream training and inference instructions remain below.
+
 ## News
 - We introduce [**WALL-OSS: Igniting VLMs toward the Embodied Space**](https://x2robot.com/en/research/68bc2cde8497d7f238dde690), an end-to-end embodied foundation model that leverages large-scale multimodal pretraining to achieve (1) embodiment-aware vision–language understanding, (2) strong language–action association, and (3) robust manipulation capability.
 

@@ -14,7 +14,6 @@ import ast
 from openpi_client import websocket_policy_server
 from wall_x.serving.policy.wall_x_policy import WallXPolicy
 from wall_x.data.utils import load_norm_stats
-from wall_x.data.load_lerobot_dataset import get_data_configs
 import torch
 import numpy as np
 
@@ -200,8 +199,11 @@ def create_policy(args: Args) -> WallXPolicy:
             f"Action tokenizer path does not exist: {config.action_tokenizer_path}"
         )
 
-    with open(config.train_config_path, "r") as f:
-        train_config = yaml.load(f, Loader=yaml.FullLoader)
+    train_config = load_config(config.train_config_path)
+    if config.norm_stats_path is not None:
+        # The model constructs its action/state normalizers from this config;
+        # use the same override as the observation DataProcessor below.
+        train_config["norm_stats_path"] = config.norm_stats_path
 
     policy = WallXPolicy(
         model_path=config.model_path,
@@ -233,12 +235,14 @@ def load_config(config_path):
     return config
 
 def main(args: Args) -> None:
-    print(f"[DEBUG] camera_key: {args.model_config.camera_key}, type: {type(args.model_config.camera_key)}")
-    config = load_config(args.model_config.train_config_path)
-    dataload_config = get_data_configs(config["data"])
-    lerobot_config = dataload_config.get("lerobot_config", {})
+    model_config = get_model_config(args)
+    print(f"[DEBUG] camera_key: {model_config.camera_key}, type: {type(model_config.camera_key)}")
+    config = load_config(model_config.train_config_path)
+    # Only repo_id is needed for inference. Importing the training dataset
+    # loader here unnecessarily requires the entire LeRobot training stack.
+    lerobot_config = config["data"].get("lerobot_config", {})
     norm_stats = load_norm_stats(
-        args.model_config.norm_stats_path if args.model_config and args.model_config.norm_stats_path else config.get("norm_stats_path", None),
+        model_config.norm_stats_path or config.get("norm_stats_path", None),
         lerobot_config.get("repo_id", None)
     )
     print(norm_stats)
@@ -261,7 +265,7 @@ def main(args: Args) -> None:
     server = websocket_policy_server.WebsocketPolicyServer(
         policy=policy,
         data_processor=dp,
-        host="0.0.0.0",
+        host=args.host,
         port=args.port,
         metadata=policy_metadata,
     )
@@ -269,4 +273,3 @@ def main(args: Args) -> None:
 
 if __name__ == "__main__":
     main(tyro.cli(Args))
-

@@ -7,6 +7,7 @@ from transformers import AutoProcessor
 from wall_x.serving.websocket_policy_server import BasePolicy
 from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl_act import Qwen2_5_VLMoEForAction
 from wall_x.serving.policy.utils import prepare_batch
+from wall_x.model.flow_context import batch_diffusion_context, split_diffusion_context
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,8 @@ class WallXPolicy(BasePolicy):
         rtc_d: int = 8,
         rtc_beta: float = 8.0,
         debug_tokens: bool = False,
+        flow_prefix_cache: bool = False,
+        flow_prefix_cache_mode: str = "suffix",
     ):
         """Initialize the Wall-X policy.
 
@@ -55,16 +58,30 @@ class WallXPolicy(BasePolicy):
         """
         logger.info(f"Loading Wall-X model from {model_path}")
 
+        # Wall-X custom CUDA operators use the process's current device when
+        # allocating scratch tensors; align it with this single-device policy.
+        target_device = torch.device(device)
+        if target_device.type == "cuda" and target_device.index is not None:
+            torch.cuda.set_device(target_device)
+
         self.model = Qwen2_5_VLMoEForAction.from_pretrained(
             model_path,
             train_config=train_config,
             action_tokenizer_path=action_tokenizer_path,
         )
         self.model.eval()
-        self.model = self.model.to(device)
-
+        # Convert on CPU first: moving the freshly constructed fp32 model to
+        # CUDA before conversion temporarily doubles the inference memory need.
+        # The resulting bfloat16 parameter values are identical.
         self.model = self.model.bfloat16()
+        self.model = self.model.to(device)
         self.model.debug_token_info = debug_tokens
+        if type(flow_prefix_cache) is not bool:
+            raise ValueError("flow_prefix_cache must be a boolean")
+        self.model.flow_prefix_cache = flow_prefix_cache
+        if flow_prefix_cache_mode not in ("suffix", "full_attention"):
+            raise ValueError("flow_prefix_cache_mode must be suffix or full_attention")
+        self.model.flow_prefix_cache_mode = flow_prefix_cache_mode
 
         # hard code the action dim to 20 for align to wall-x configuration
         self.fixed_action_dim = 20
@@ -118,7 +135,82 @@ class WallXPolicy(BasePolicy):
         self.buffer_index = 0
         logger.debug("Policy reset")
 
-    def infer(self, obs: Dict, prev_action=None, is_rtc: bool = False) -> Dict:
+    def prepare_observation(self, obs: Dict):
+        """Apply the same model preprocessing as the legacy infer API."""
+        return prepare_batch(
+            obs, self.processor, self.camera_key, self.agent_pos_dim,
+            self.action_dim, self.pred_horizon, self.fixed_action_dim,
+            self.max_length, self.image_factor, self.min_pixels,
+            self.max_pixels, self.predict_mode, self.device,
+            self.input_image_resolution,
+        )
+
+    def prepare_observations(self, observations: List[Dict]):
+        """Prepare all rows together, preserving camera and prompt order."""
+        return self.prepare_observation(observations)
+
+    def encode_batch(self, observations: List[Dict], *, num_inference_timesteps: int = 10):
+        """Run a single batched visual encode and return independent row caches."""
+        if self.predict_mode != "diffusion":
+            raise ValueError("Native batching requires diffusion prediction")
+        if type(num_inference_timesteps) is not int or num_inference_timesteps < 1:
+            raise ValueError("num_inference_timesteps must be a positive integer")
+        self._check_batch_attention()
+        with torch.no_grad():
+            context = self.model.prepare_diffusion_context(
+                **self.prepare_observations(observations),
+                action_dim=self.fixed_action_dim, pred_horizon=self.pred_horizon,
+                num_inference_timesteps=num_inference_timesteps,
+            )
+            return split_diffusion_context(context)
+
+    def decode_batch(self, contexts, initial_noise=None) -> Dict:
+        """Decode reusable rows with one batched transformer call per flow step."""
+        self._check_batch_attention()
+        pad_token_id = self.processor.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = self.processor.tokenizer.eos_token_id
+        with torch.no_grad():
+            context = batch_diffusion_context(contexts, pad_token_id=pad_token_id)
+            output = self.model.decode_diffusion_context(context, initial_noise)
+        return {"action": output["predict_action"][:, :, :self.action_dim].float().cpu().numpy()}
+
+    def infer_batch(self, observations: List[Dict], *, initial_noise=None,
+                    num_inference_timesteps: int = 10) -> Dict:
+        """True batched diffusion inference; singleton/RTC APIs remain unchanged."""
+        return self.decode_batch(
+            self.encode_batch(observations, num_inference_timesteps=num_inference_timesteps),
+            initial_noise=initial_noise,
+        )
+
+    def _check_batch_attention(self):
+        # Wall-X's custom Flash attention does not support padded multimodal
+        # sequences. Eager is the checkpoint loader's existing default and is
+        # required here so variable-length rows retain singleton semantics.
+        implementation = getattr(self.model.config, "_attn_implementation", "eager")
+        if implementation != "eager":
+            raise ValueError("Native Wall-X batching requires eager attention")
+
+    def encode(self, obs: Dict, *, num_inference_timesteps: int = 10):
+        """Return reusable, noise-independent conditioning for flow inference."""
+        if self.predict_mode != "diffusion":
+            raise ValueError("DSRL conditioning requires diffusion prediction")
+        if type(num_inference_timesteps) is not int or num_inference_timesteps < 1:
+            raise ValueError("num_inference_timesteps must be a positive integer")
+        with torch.no_grad():
+            return self.model.prepare_diffusion_context(
+                **self.prepare_observation(obs),
+                action_dim=self.fixed_action_dim,
+                pred_horizon=self.pred_horizon,
+                num_inference_timesteps=num_inference_timesteps,
+            )
+
+    def decode(self, context, initial_noise=None) -> Dict:
+        with torch.no_grad():
+            output = self.model.decode_diffusion_context(context, initial_noise)
+        return {"action": output["predict_action"][:, :, :self.action_dim].float().cpu().numpy()}
+
+    def infer(self, obs: Dict, prev_action=None, is_rtc: bool = False, initial_noise=None) -> Dict:
         """Infer action from observation.
 
         Args:
@@ -137,22 +229,7 @@ class WallXPolicy(BasePolicy):
         """
         try:
             # Need to predict new actions
-            input_batch = prepare_batch(
-                obs,
-                self.processor,
-                self.camera_key,
-                self.agent_pos_dim,
-                self.action_dim,
-                self.pred_horizon,
-                self.fixed_action_dim,
-                self.max_length,
-                self.image_factor,
-                self.min_pixels,
-                self.max_pixels,
-                self.predict_mode,
-                self.device,
-                self.input_image_resolution,
-            )
+            input_batch = self.prepare_observation(obs)
 
             # Prepare prev_action for guided inference
             prev_action_tensor = None
@@ -205,6 +282,7 @@ class WallXPolicy(BasePolicy):
                     rtc_s=self.rtc_s,
                     rtc_d=self.rtc_d,
                     rtc_beta=self.rtc_beta,
+                    initial_noise=initial_noise,
                 )
 
             if outputs["predict_action"] is None:

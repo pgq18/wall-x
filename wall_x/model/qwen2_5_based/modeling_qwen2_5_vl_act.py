@@ -37,6 +37,7 @@ from transformers.modeling_outputs import (
 
 from wall_x.fusions import ops
 from wall_x.model.action_head import ActionProcessor
+from wall_x.model.flow_context import initial_flow_noise, pool_conditioning_feature
 from wall_x.model.qwen2_5_based.configuration_qwen2_5_vl import Qwen2_5_VLConfig
 from wall_x.model.qwen2_5_based.modeling_qwen2_5_vl import (
     Qwen2_5_VisionTransformerPretrainedModel,
@@ -1687,6 +1688,22 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         return output["predict_action"], output.get("gt_action", None)
 
     @torch.no_grad()
+    def prepare_diffusion_context(self, **kwargs):
+        """Encode images, prompt and proprioception once, before sampling noise.
+
+        The returned inputs cache multimodal embeddings and RoPE indices. They
+        do not contain transformer KV state; the transformer still runs at each
+        flow step, exactly as in ordinary inference.
+        """
+        return self.predict(predict_mode="diffusion", return_context=True, **kwargs)
+
+    @torch.no_grad()
+    def decode_diffusion_context(self, context, initial_noise=None):
+        return self.predict(
+            predict_mode="diffusion", initial_noise=initial_noise, **context["inputs"]
+        )
+
+    @torch.no_grad()
     def predict(
         self,
         predict_mode: str,
@@ -1721,6 +1738,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         rtc_s: int = 16,
         rtc_d: int = 8,
         rtc_beta: float = 8.0,
+        initial_noise: Optional[torch.FloatTensor] = None,
+        return_context: bool = False,
         **kwargs,
     ):
         """
@@ -1770,9 +1789,41 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 - 'predict_output_text': Generated text (for text/fast modes)
                 - 'gt_output_text': Ground truth text (for text/fast modes)
         """
+        if predict_mode != "diffusion" and (initial_noise is not None or return_context):
+            raise ValueError("External noise and conditioning contexts require diffusion mode")
+        if return_context and (prev_action is not None or past_key_values is not None):
+            raise ValueError("Reusable conditioning contexts cannot contain RTC or past KV state")
         batch_size = (
             input_ids.shape[0] if input_ids is not None else inputs_embeds.shape[0]
         )
+
+        if predict_mode == "diffusion":
+            # Flattened masked assignment below relies on each row containing
+            # exactly H action tokens. A correct *total* is insufficient: an
+            # H-1 / H+1 pair would silently exchange actions between requests.
+            if pred_horizon is None or pred_horizon <= 0:
+                raise ValueError("Diffusion prediction requires a positive pred_horizon")
+            if action_dim is None or action_dim <= 0:
+                raise ValueError("Diffusion prediction requires a positive action_dim")
+            if input_ids is None:
+                raise ValueError("Diffusion prediction requires input_ids for action routing")
+            action_tokens = input_ids == self.action_token_id_set["action_token_id"]
+            if not torch.all(action_tokens.sum(dim=1) == pred_horizon):
+                raise ValueError("Each diffusion batch row must contain pred_horizon action tokens")
+            if attention_mask is not None and attention_mask.ndim == 2:
+                if torch.any(action_tokens & ~attention_mask.bool()):
+                    raise ValueError("Diffusion action tokens cannot be padding")
+                if batch_size > 1 and not torch.all(attention_mask):
+                    implementation = getattr(self.config, "_attn_implementation", "eager")
+                    if implementation != "eager":
+                        # The custom Flash implementation ignores padding, and
+                        # this model's SDPA fast path changes action attention
+                        # semantics when padding appears. Eager implements the
+                        # checkpoint's bidirectional action mask consistently.
+                        raise ValueError(
+                            "Padded diffusion batches require eager attention to preserve "
+                            "independent single-observation behavior"
+                        )
 
         # Text and fast modes require batch size 1 for autoregressive generation
         if predict_mode in ["text", "fast"]:
@@ -1798,11 +1849,21 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         # Process input embeddings with multi-modal data
         if inputs_embeds is None:
             inputs_embeds = self.model.embed_tokens(input_ids)
+            # A true observation batch contains independent image/window
+            # attention blocks. Evaluate those blocks as batched segments,
+            # avoiding an attention matrix over every image in every row.
+            # Leave the legacy singleton visual path exactly as before.
+            visual_options = {"segmented_attention": True} if batch_size > 1 else {}
 
             # Process image embeddings
             if pixel_values is not None:
                 pixel_values = pixel_values.type(self.visual.dtype)
-                image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+                if batch_size > 1:
+                    visual_options["sample_token_counts"] = (
+                        input_ids.eq(self.config.image_token_id).sum(dim=1)
+                        * self.visual.spatial_merge_unit
+                    )
+                image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw, **visual_options)
                 n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
                 n_image_features = image_embeds.shape[0]
 
@@ -1825,7 +1886,12 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             # Process video embeddings
             if pixel_values_videos is not None:
                 pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
-                video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
+                if batch_size > 1:
+                    visual_options["sample_token_counts"] = (
+                        input_ids.eq(self.config.video_token_id).sum(dim=1)
+                        * self.visual.spatial_merge_unit
+                    )
+                video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw, **visual_options)
                 n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
                 n_video_features = video_embeds.shape[0]
 
@@ -1897,6 +1963,22 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     vision_start_token_id=self.config.vision_start_token_id,
                     tokens_per_second=self.config.vision_config.tokens_per_second,
                 )
+                if (
+                    batch_size > 1 and attention_mask is not None
+                    and (image_grid_thw is not None or video_grid_thw is not None)
+                ):
+                    # The fused multimodal RoPE kernel counts left padding in
+                    # its text offsets. Remove this per-row constant so valid
+                    # positions match separately encoded observations exactly.
+                    # Its text-only branch already uses masked cumsum and must
+                    # not receive this correction. Preserve legacy B=1 output.
+                    leading_padding = attention_mask.to(torch.long).argmax(dim=-1)
+                    position_ids = torch.where(
+                        attention_mask.bool().unsqueeze(0),
+                        position_ids - leading_padding[None, :, None],
+                        position_ids,
+                    )
+                    rope_deltas = rope_deltas - leading_padding[:, None]
                 self.rope_deltas = rope_deltas
             # Use previously calculated rope deltas to get correct position IDs
             else:
@@ -1912,6 +1994,27 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+        if return_context:
+            feature = pool_conditioning_feature(
+                inputs_embeds, input_ids,
+                self.action_token_id_set["action_token_id"], attention_mask,
+            )
+            return {
+                "feature": feature.detach(),
+                "inputs": {
+                    "pred_horizon": pred_horizon,
+                    "action_dim": action_dim,
+                    "input_ids": input_ids,
+                    "inputs_embeds": inputs_embeds.detach(),
+                    "attention_mask": attention_mask,
+                    "position_ids": position_ids,
+                    "moe_token_types": moe_token_types,
+                    "dof_mask": dof_mask,
+                    "dataset_names": dataset_names,
+                    "num_inference_timesteps": num_inference_timesteps,
+                },
+            }
 
         # Prepare action chunk data if provided
         if action_chunk is not None:
@@ -2044,11 +2147,11 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
         # Handle diffusion-based action prediction
         if predict_mode == "diffusion":
-            # Initialize with random noise
-            noisy_action = torch.randn(
-                size=(batch_size, pred_horizon, action_dim),
-                dtype=inputs_embeds.dtype,
-                device=inputs_embeds.device,
+            # None preserves legacy random sampling; external noise controls the
+            # complete latent width, including the model's padded channels.
+            noisy_action = initial_flow_noise(
+                initial_noise, batch_size=batch_size, horizon=pred_horizon,
+                action_dim=action_dim, reference=inputs_embeds,
             )
             dof_mask = dof_mask.to(inputs_embeds.device).to(inputs_embeds.dtype)
 
@@ -2064,24 +2167,35 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             end_indices = torch.cumsum(group_size, dim=0)
 
             # Prepare RTC guided inference parameters
-            # prev_action is in normalized space, shape: [pred_horizon, action_dim] or [1, pred_horizon, action_dim]
+            # prev_action is in normalized space. Keep every request's history
+            # separate; taking row zero would guide the whole batch with it.
             rtc_prev_padded = None
             rtc_weight_matrix = None
             if prev_action is not None:
                 # Cast to model dtype to avoid float32/bfloat16 mismatch
-                prev_action = prev_action.to(dtype=inputs_embeds.dtype)
-                if prev_action.dim() == 3:
-                    prev_action = prev_action[0]  # Remove batch dim -> [H, D]
+                prev_action = prev_action.to(
+                    device=inputs_embeds.device, dtype=inputs_embeds.dtype,
+                )
+                if prev_action.dim() == 2:
+                    prev_action = prev_action.unsqueeze(0)
+                if (
+                    prev_action.dim() != 3
+                    or prev_action.shape[:2] != (batch_size, pred_horizon)
+                    or prev_action.shape[-1] < action_dim
+                ):
+                    raise ValueError("RTC prev_action must provide [B, H, D] history for every batch row")
+                if not 0 <= rtc_s <= pred_horizon or rtc_d < 0:
+                    raise ValueError("RTC requires 0 <= rtc_s <= pred_horizon and rtc_d >= 0")
 
                 # Get prev_action from step s onwards, then pad s zeros at the end.
                 # This aligns with Pi0: prev_action data in the first part (strong guidance),
                 # zeros in the last part (free prediction).
-                shifted = prev_action[rtc_s:, :action_dim]
+                shifted = prev_action[:, rtc_s:, :action_dim]
                 padding = torch.zeros(
-                    rtc_s, action_dim,
+                    batch_size, rtc_s, action_dim,
                     device=inputs_embeds.device, dtype=inputs_embeds.dtype,
                 )
-                rtc_prev_padded = torch.cat([shifted, padding], dim=0).unsqueeze(0)  # [1, H, D]
+                rtc_prev_padded = torch.cat([shifted, padding], dim=1)  # [B, H, D]
 
                 # Build weight matrix W ∈ R^H (matches Pi0's make_W).
                 # Three segments: [1]*d, smooth decay, [0]*s
@@ -2098,6 +2212,20 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                         rtc_weight_matrix[i] = 0.0
                 # Shape: [1, H, 1] for broadcasting with [B, H, D]
                 rtc_weight_matrix = rtc_weight_matrix.unsqueeze(0).unsqueeze(-1)
+
+            prefix = None
+            if getattr(self, "flow_prefix_cache", False):
+                if prev_action is not None or past_key_values is not None:
+                    raise ValueError("Diffusion prefix caching does not support RTC or external KV state")
+                from wall_x.model.flow_prefix import DiffusionPrefix
+                prefix = DiffusionPrefix(
+                    self.model, input_ids=input_ids, inputs_embeds=inputs_embeds,
+                    attention_mask=attention_mask, position_ids=position_ids,
+                    moe_token_types=moe_token_types,
+                    action_mask=input_ids == self.action_token_id_set["action_token_id"],
+                    horizon=pred_horizon,
+                    mode=getattr(self, "flow_prefix_cache_mode", "suffix"),
+                )
 
             def step(timestep, noisy_action):
                 """
@@ -2150,7 +2278,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                         v = v.reshape(batch_size, pred_horizon, action_dim)
 
                         # Predict clean action (wall-x: t=0 noise, t=1 clean)
-                        t_val = timestep[0].item()
+                        t_val = timestep.item()
                         a_pred = x_t[:, :, :action_dim] + (1.0 - t_val) * v
 
                         # Weighted error: e = W * (prev_action - a_pred)
@@ -2191,24 +2319,36 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     )
                     action_embed = action_embed.reshape(-1, inputs_embeds.shape[-1])
 
+                    if prefix is not None and prefix.ready:
+                        action_hidden_states = prefix.forward(action_embed)
+                        v = self.action_preprocessor.action_proj_back(action_hidden_states)
+                        return v.reshape(batch_size, pred_horizon, action_dim)
+
                     temp_inputs_embeds = inputs_embeds.clone()
                     temp_inputs_embeds[action_mask] = action_embed
 
-                    transformer_outputs = self.model(
-                        input_ids=None,
-                        attention_mask=attention_mask,
-                        position_ids=position_ids,
-                        past_key_values=past_key_values,
-                        inputs_embeds=temp_inputs_embeds,
-                        moe_token_types=moe_token_types,
-                        start_indices=start_indices,
-                        end_indices=end_indices,
-                        use_cache=True,
-                        output_attentions=False,
-                        output_hidden_states=False,
-                        return_dict=True,
-                    )
+                    capture_hooks = prefix.capture_hooks() if prefix is not None else []
+                    try:
+                        transformer_outputs = self.model(
+                            input_ids=None,
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                            past_key_values=past_key_values,
+                            inputs_embeds=temp_inputs_embeds,
+                            moe_token_types=moe_token_types,
+                            start_indices=start_indices,
+                            end_indices=end_indices,
+                            use_cache=True,
+                            output_attentions=False,
+                            output_hidden_states=False,
+                            return_dict=True,
+                        )
+                    finally:
+                        for handle in capture_hooks:
+                            handle.remove()
 
+                    if prefix is not None:
+                        prefix.capture(transformer_outputs.past_key_values)
                     hidden_states = transformer_outputs.last_hidden_state
                     action_hidden_states = hidden_states[action_mask]
                     v = self.action_preprocessor.action_proj_back(action_hidden_states)

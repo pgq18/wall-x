@@ -3,6 +3,9 @@
 #include <device_launch_parameters.h>
 #include <cstdint>
 #include <algorithm>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 
 __global__ void compute_metadata(
     const int *grid_thw, // [num_grids, 3]
@@ -101,35 +104,6 @@ __global__ void compute_window_counts(
     }
 }
 
-__global__ void compute_cu_window_seqlens(
-    const int *window_counts,
-    int *cu_window_seqlens, // [total_windows + 1]
-    int total_windows,
-    int spatial_merge_unit)
-{
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (tid == 0)
-    {
-        cu_window_seqlens[0] = 0;
-    }
-
-    if (tid < total_windows)
-    {
-        cu_window_seqlens[tid + 1] = window_counts[tid] * spatial_merge_unit;
-    }
-
-    __syncthreads();
-
-    if (tid == 0)
-    {
-        for (int i = 1; i <= total_windows; i++)
-        {
-            cu_window_seqlens[i] += cu_window_seqlens[i - 1];
-        }
-    }
-}
-
 __global__ void generate_window_indices(
     const int *grid_thw,
     const int *grid_info,
@@ -215,6 +189,8 @@ std::tuple<torch::Tensor, torch::Tensor> get_window_index_cuda(
     TORCH_CHECK(grid_thw.is_cuda(), "grid_thw must be a CUDA tensor");
     TORCH_CHECK(grid_thw.dim() == 2 && grid_thw.size(1) == 3);
     TORCH_CHECK(grid_thw.dtype() == torch::kInt32);
+    const c10::cuda::CUDAGuard device_guard(grid_thw.device());
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream(grid_thw.get_device()).stream();
 
     int num_grids = grid_thw.size(0);
     if (num_grids == 0)
@@ -242,9 +218,10 @@ std::tuple<torch::Tensor, torch::Tensor> get_window_index_cuda(
 
     int threads1 = 256;
     int blocks1 = (num_grids + threads1 - 1) / threads1;
-    compute_metadata<<<blocks1, threads1>>>(
+    compute_metadata<<<blocks1, threads1, 0, stream>>>(
         d_grid_thw, d_grid_info, d_global_totals,
         num_grids, spatial_merge_size, vit_merger_window_size);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     auto totals_cpu = global_totals_tensor.cpu();
     int total_elements = totals_cpu[0].item<int>();
@@ -258,10 +235,8 @@ std::tuple<torch::Tensor, torch::Tensor> get_window_index_cuda(
     }
 
     torch::Tensor window_indices = torch::empty({total_elements}, options);
-    torch::Tensor cu_window_seqlens = torch::empty({total_windows + 1}, options);
 
     int *d_window_indices = window_indices.data_ptr<int>();
-    int *d_cu_window_seqlens = cu_window_seqlens.data_ptr<int>();
 
     auto window_counts_tensor = torch::empty({total_windows}, options);
     int *d_window_counts = window_counts_tensor.data_ptr<int>();
@@ -269,18 +244,25 @@ std::tuple<torch::Tensor, torch::Tensor> get_window_index_cuda(
     dim3 blocks2(max_grid_t, num_grids);
     dim3 threads2(256);
 
-    compute_window_counts<<<blocks2, threads2>>>(
+    compute_window_counts<<<blocks2, threads2, 0, stream>>>(
         d_grid_thw, d_grid_info, d_window_counts,
         vit_merger_window_size, spatial_merge_unit, num_grids);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-    int threads4 = 256;
-    int blocks4 = (total_windows + threads4 - 1) / threads4;
-    compute_cu_window_seqlens<<<blocks4, threads4>>>(
-        d_window_counts, d_cu_window_seqlens, total_windows, spatial_merge_unit);
+    // __syncthreads cannot synchronize different CUDA blocks. The previous
+    // single-thread scan raced with writes from other blocks once there were
+    // more than 256 windows (e.g. 64 PAP observations). Use PyTorch's device-wide
+    // prefix sum on the same current stream as the producers and consumer.
+    torch::Tensor cu_window_seqlens = torch::cat({
+        torch::zeros({1}, options),
+        window_counts_tensor.cumsum(0, torch::kInt32) * spatial_merge_unit,
+    });
+    int *d_cu_window_seqlens = cu_window_seqlens.data_ptr<int>();
 
-    generate_window_indices<<<blocks2, threads2>>>(
+    generate_window_indices<<<blocks2, threads2, 0, stream>>>(
         d_grid_thw, d_grid_info, d_cu_window_seqlens, d_window_indices,
         vit_merger_window_size, spatial_merge_unit, num_grids);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     return std::make_tuple(window_indices, cu_window_seqlens);
 }

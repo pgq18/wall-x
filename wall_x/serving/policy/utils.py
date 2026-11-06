@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 def prepare_batch(
-    obs: Dict,
+    obs: Dict | List[Dict],
     processor,
     camera_key: List[str],
     agent_pos_dim,
@@ -26,7 +26,7 @@ def prepare_batch(
     device: str = "cuda",
     input_image_resolution: int | None = None,
 ) -> BatchFeature:
-    """Prepare observation into model input format.
+    """Prepare one observation or a true batch into model input format.
 
     Args:
         obs: Dictionary containing:
@@ -40,131 +40,88 @@ def prepare_batch(
     Returns:
         BatchFeature object ready for model input
     """
-    # Handle images - can be single image, list of images, or dict of images
-    images = []
-    # Debug: print camera key and obs keys
-    print(f"[DEBUG] camera_key: {camera_key}")
-    print(f"[DEBUG] obs keys: {list(obs.keys())}")
-    for key in camera_key:
-        if key in obs:
-            img = obs[key]
-            shape = img.shape if hasattr(img, 'shape') else 'N/A'
-            print(f"[DEBUG] Found {key}, image shape: {shape}")
-        else:
-            print(f"[DEBUG] WARNING: {key} not found in obs!")
-    images = [obs[key] for key in camera_key]
-    # Convert numpy arrays to PIL Images
-    processed_images = []
-    for img in images:
-        if isinstance(img, np.ndarray):
-            # Debug: Log the shape and dtype
-            logger.debug(f"Image shape: {img.shape}, dtype: {img.dtype}")
+    observations = [obs] if isinstance(obs, dict) else list(obs)
+    if not observations:
+        raise ValueError("At least one observation is required")
+    if len(observations) > 1 and predict_mode != "diffusion":
+        raise ValueError("Native batched inference requires diffusion mode")
+    if processor.tokenizer.padding_side != "left":
+        raise ValueError("Wall-X inference requires left tokenizer padding")
 
-            # Handle unexpected dimensions - squeeze if needed
-            if img.ndim > 3:
-                logger.warning(
-                    f"Image has {img.ndim} dimensions, squeezing extra dimensions"
-                )
-                img = np.squeeze(img)
+    image_batches, texts, states, dataset_names = [], [], [], []
+    for observation in observations:
+        images = [_as_pil_image(observation[key]) for key in camera_key]
+        image_batches.append(process_images(
+            images, image_factor, min_pixels, max_pixels, input_image_resolution,
+        ))
+        texts.append(format_text_with_vision_tokens(
+            observation["prompt"], camera_key, predict_mode, pred_horizon,
+        ))
+        if "state" not in observation:
+            raise ValueError("Wall-X observations require robot state")
+        state = torch.as_tensor(observation["state"], dtype=torch.float32)
+        if state.ndim == 1:
+            state = state[None, None, :]
+        elif state.ndim == 2:
+            state = state[None, :, :]
+        if state.ndim != 3 or state.shape[0] != 1:
+            raise ValueError("Each observation state must describe exactly one sample")
+        if state.shape[-1] > fixed_action_dim:
+            raise ValueError("Robot state exceeds the model's fixed action width")
+        state = torch.nn.functional.pad(state, (0, fixed_action_dim - state.shape[-1]))
+        states.append(state)
+        names = observation["dataset_names"]
+        if isinstance(names, str):
+            names = [names]
+        if len(names) != 1 or not isinstance(names[0], str):
+            raise ValueError("Each observation requires exactly one dataset name")
+        dataset_names.append(names[0])
 
-            # Verify shape is valid for PIL
-            if img.ndim == 2:
-                # Grayscale image
-                pass
-            elif img.ndim == 3:
-                # Check if channel dimension is first or last
-                if img.shape[0] == 3 or img.shape[0] == 1:
-                    # Channels first, transpose to channels last
-                    img = np.transpose(img, (1, 2, 0))
-                elif img.shape[2] == 3 or img.shape[2] == 1:
-                    # Already channels last
-                    pass
-                else:
-                    raise ValueError(
-                        f"Unexpected image shape: {img.shape}. Expected (H, W, C) or (C, H, W)"
-                    )
-            else:
-                raise ValueError(
-                    f"Invalid image dimensions: {img.ndim}. Expected 2 or 3 dimensions, got shape {img.shape}"
-                )
-
-            # Convert to PIL Image
-            if img.dtype == np.uint8:
-                img = Image.fromarray(img)
-            else:
-                img = Image.fromarray((img * 255).astype(np.uint8))
-        processed_images.append(img)
-
-    # Apply smart resize to images
-    resized_images = process_images(
-        processed_images, image_factor, min_pixels, max_pixels,
-        input_image_resolution
-    )
-
-    # Handle text prompt - format with vision tokens
-    instruction = obs["prompt"]
-    formatted_text = format_text_with_vision_tokens(
-        instruction, camera_key, predict_mode, pred_horizon
-    )
-
-    # Use processor to prepare inputs
+    # The image processor flattens nested camera lists in sample-major order;
+    # preprocesser_call expands image placeholders in the same order. Both the
+    # visual encoder and the flow transformer therefore run on the entire batch.
     inputs = preprocesser_call(
-        processor=processor,
-        text=[formatted_text],
-        images=[resized_images],
-        videos=None,
-        padding=True,
-        truncation=True,
-        return_tensors="pt",
-        max_length=max_length,
+        processor=processor, text=texts, images=image_batches, videos=None,
+        padding=True, truncation=True, return_tensors="pt", max_length=max_length,
     )
-
     action_token_id = processor.tokenizer.convert_tokens_to_ids("<|action|>")
-    moe_token_types = inputs.input_ids == action_token_id
-    inputs["moe_token_types"] = moe_token_types
-
-    # Handle robot state/proprioception if available
-    if "state" in obs:
-        state = obs["state"]
-        if isinstance(state, np.ndarray):
-            state = torch.from_numpy(state).float()
-        elif not isinstance(state, torch.Tensor):
-            state = torch.tensor(state, dtype=torch.float32)
-
-        # Add batch dimension if needed
-        if state.dim() == 1:
-            state = state.unsqueeze(0)
-        if state.dim() == 2:
-            state = state.unsqueeze(1)  # [batch, 1, state_dim]
-
-        # Pad to 20 dimensions if needed (same as training)
-        if state.shape[-1] < 20:
-            padding = torch.zeros(state.shape[0], state.shape[1], 20 - state.shape[-1])
-            state = torch.cat([state, padding], dim=-1)
-
-        # Create mask for valid dimensions
-        agent_pos_mask = torch.ones_like(state)
-        if state.shape[-1] > agent_pos_dim:
-            agent_pos_mask[:, :, agent_pos_dim:] = 0
-
-        inputs["proprioception"] = state
-        inputs["agent_pos_mask"] = agent_pos_mask
-
-    # Add dataset name (required by model)
-    inputs["dataset_names"] = obs["dataset_names"]
-
-    # Move all tensors to device
-    for key in inputs:
-        if isinstance(inputs[key], torch.Tensor):
-            inputs[key] = inputs[key].to(device)
-
-    dof_mask = torch.ones([state.shape[0], pred_horizon, fixed_action_dim])
+    inputs["moe_token_types"] = inputs.input_ids == action_token_id
+    if predict_mode == "diffusion" and not torch.all(
+        inputs["moe_token_types"].sum(dim=1) == pred_horizon
+    ):
+        raise ValueError("Observation truncation removed action tokens; increase max_length")
+    if len({tuple(state.shape[1:]) for state in states}) != 1:
+        raise ValueError("Batched observations must have the same proprioception history length")
+    state = torch.cat(states, dim=0)
+    agent_pos_mask = torch.ones_like(state)
+    agent_pos_mask[:, :, agent_pos_dim:] = 0
+    inputs["proprioception"] = state
+    inputs["agent_pos_mask"] = agent_pos_mask
+    inputs["dataset_names"] = dataset_names
+    dof_mask = torch.ones((len(observations), pred_horizon, fixed_action_dim))
     dof_mask[:, :, action_dim:] = 0
-
     inputs["dof_mask"] = dof_mask
-
-    # Convert to BatchFeature to maintain consistency with training pipeline
     return BatchFeature(data=dict(inputs)).to(device)
+
+
+def _as_pil_image(img):
+    """Keep legacy image conversion identical for singleton and batch input."""
+    if not isinstance(img, np.ndarray):
+        return img
+    if img.ndim > 3:
+        img = np.squeeze(img)
+    if img.ndim == 3:
+        if img.shape[0] in (1, 3):
+            img = np.transpose(img, (1, 2, 0))
+        elif img.shape[2] not in (1, 3):
+            raise ValueError(f"Unexpected image shape: {img.shape}")
+        if img.shape[-1] == 1:
+            img = img[..., 0]
+    elif img.ndim != 2:
+        raise ValueError(f"Invalid image dimensions: {img.ndim}")
+    if img.dtype != np.uint8:
+        img = (img * 255).astype(np.uint8)
+    return Image.fromarray(img)
 
 
 def process_images(

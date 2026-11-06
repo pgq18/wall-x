@@ -40,6 +40,8 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+build_5090/
+build_h200/
 develop-eggs/
 dist/
 downloads/

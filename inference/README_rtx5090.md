@@ -127,3 +127,58 @@ unexpected keys or shape mismatches. Its 113 expected missing state-dict entries
 consist only of the 112 deliberately filtered normalizer entries and the tied
 `lm_head.weight`. The audit is recorded in
 `outputs/wallx_inference_20261022/checkpoint_key_audit.json`.
+
+## Native batch 64 DSRL node
+
+The 2026-11-05 PressB deployment uses physical GPU 0 for a separate schema-v2
+inference node at `ws://127.0.0.1:18131`. It keeps BF16, native batch 64, a
+32-action horizon, ten Euler steps, and `flow_prefix_cache_mode="full_attention"`.
+The existing singleton/RTC entrypoint above retains its original API.
+
+After the window-index CUDA race fix, rebuild the local extension before running
+large batches. An older installed `.so` does not acquire the source fix:
+
+```bash
+cd ref/wall-x
+unset TORCH_CUDA_ARCH_LIST
+CUDA_VISIBLE_DEVICES=1 CUDA_HOME=/usr/local/cuda-12.8 MAX_JOBS=4 \
+  ../../.conda/envs/wallx-inference/bin/python setup.py build_ext \
+  --inplace --build-temp build_5090 --force
+CUDA_VISIBLE_DEVICES=1 PYTHONPATH=.:packages \
+  ../../.conda/envs/wallx-inference/bin/python tests/check_window_index_cuda.py \
+  --repeats 20
+```
+
+The local build must show `sm_120` and `GROUPED_GEMM_DEVICE_CAPABILITY=120`.
+The CUDA check covers 200 trials, including more than 256 windows and nondefault
+CUDA streams. The PressB backend imports the checkout before installed modules,
+so its in-place extension is used; inspect `wallx_csrc.__file__` when checking a
+different launcher.
+
+Launch the node from the PressB root with the reusable configuration:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
+  OPENBLAS_NUM_THREADS=1 PYTHONNOUSERSITE=1 \
+  .conda/envs/wallx-inference/bin/python scripts/serve_inference_node.py \
+  --config configs/rl_nodes/pap_walloss_local_fast_inference.json
+```
+
+The `outputs/pap_dsrl_local_5090_20261105/` deployment directory contains the effective configuration, process receipt,
+environment and extension identities, build/kernel-check logs, and real
+64-observation RPC results with action/feature arrays. The first local smoke test
+returned finite `[64,32,7]` actions and `[64,2048]` features, with exact repeated
+outputs. Paired H200 measurements are recorded separately because H200 currently
+uses Torch 2.6/CUDA 12.4 while this environment uses Torch 2.7/CUDA 12.8.
+
+Two complete 10,048-transition PAP DSRL trials measured 12.9107 transitions/s
+with inference and SAC sharing GPU 1, and 13.3434/s with inference and simulation
+sharing GPU 0 while SAC uses GPU 1. The latter was 6.33% faster than the measured
+H200 deployment. GPU 0 sampled peak use was 29,852 MiB with 2,235 MiB minimum
+free memory. The two local GPUs produced exactly identical features/actions
+for the same saved inputs; H200/local BF16 outputs differed. These are throughput
+measurements, not task-success evaluations. Detailed results are in PressB's
+`docs/pap_dsrl_local_inference.md`. The training, simulation and inference
+services were stopped on 2026-11-06 for the completed PressB refactor. The
+historical deployment receipt is under
+`outputs/pap_dsrl_local_5090_20261105/sim_inference_colocated/` in PressB.

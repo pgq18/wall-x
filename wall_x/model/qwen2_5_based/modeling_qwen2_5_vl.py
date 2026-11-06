@@ -29,6 +29,7 @@ from transformers.utils import (
 )
 from .configuration_qwen2_5_vl import Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig
 from wall_x.fusions import ops
+from wall_x.model.vision_batch import vision_attention_segments, segmented_vision_attention
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_varlen_func
@@ -179,6 +180,7 @@ class Qwen2_5_VLVisionFlashAttention2(nn.Module):
         max_seqlen: Optional[int] = None,
         rotary_pos_emb: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_segments=None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
@@ -248,6 +250,7 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         max_seqlen: Optional[int] = None,
         rotary_pos_emb: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_segments=None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
@@ -269,6 +272,12 @@ class Qwen2_5_VLVisionAttention(nn.Module):
         else:
             cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
+
+        if attention_segments is not None:
+            attn_output = segmented_vision_attention(
+                q, k, v, attention_segments, implementation="eager",
+            )
+            return self.proj(attn_output.reshape(seq_length, -1))
 
         attention_mask = torch.full(
             [1, seq_length, seq_length],
@@ -312,6 +321,7 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         max_seqlen: Optional[int] = None,
         rotary_pos_emb: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_segments=None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
@@ -333,6 +343,12 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         else:
             cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
+
+        if attention_segments is not None:
+            attn_output = segmented_vision_attention(
+                q, k, v, attention_segments, implementation="sdpa",
+            )
+            return self.proj(attn_output.reshape(seq_length, -1))
 
         attention_mask = torch.zeros(
             [1, seq_length, seq_length], device=q.device, dtype=torch.bool
@@ -379,6 +395,7 @@ class Qwen2_5_VLVisionBlock(nn.Module):
         max_seqlen: Optional[int] = None,
         rotary_pos_emb: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_segments=None,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
@@ -386,6 +403,7 @@ class Qwen2_5_VLVisionBlock(nn.Module):
             max_seqlen=max_seqlen,
             rotary_pos_emb=rotary_pos_emb,
             position_embeddings=position_embeddings,
+            attention_segments=attention_segments,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -547,7 +565,9 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
         return window_index, cu_window_seqlens
 
     def forward(
-        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor
+        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, *,
+        segmented_attention: bool = False,
+        sample_token_counts=None,
     ) -> torch.Tensor:
         """
         Args:
@@ -602,13 +622,24 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
             (cu_window_seqlens[1:] - cu_window_seqlens[:-1]).max().item()
         )
 
+        # Segments are image/frame blocks for full attention and local window
+        # blocks otherwise. Prepare their indices once and share across layers.
+        full_segments = window_segments = None
+        if segmented_attention:
+            full_segments = vision_attention_segments(cu_seqlens, token_count=seq_len,
+                                                      sample_token_counts=sample_token_counts)
+            window_segments = vision_attention_segments(cu_window_seqlens, token_count=seq_len,
+                                                        sample_token_counts=sample_token_counts)
+
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
                 max_seqlen_now = max_seqlen_full
+                segments_now = full_segments
             else:
                 cu_seqlens_now = cu_window_seqlens
                 max_seqlen_now = max_seqlen_window
+                segments_now = window_segments
             if self.gradient_checkpointing and self.training:
                 hidden_states = self._gradient_checkpointing_func(
                     blk.__call__,
@@ -623,6 +654,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
                     cu_seqlens=cu_seqlens_now,
                     max_seqlen=max_seqlen_now,
                     position_embeddings=position_embeddings,
+                    attention_segments=segments_now,
                 )
 
         hidden_states = self.merger(hidden_states)
